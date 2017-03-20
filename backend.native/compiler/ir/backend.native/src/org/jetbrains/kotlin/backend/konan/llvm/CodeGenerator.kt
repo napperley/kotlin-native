@@ -17,6 +17,7 @@
 package org.jetbrains.kotlin.backend.konan.llvm
 
 
+import debugInfo.DILocationRef
 import kotlinx.cinterop.*
 import llvm.*
 import org.jetbrains.kotlin.backend.konan.Context
@@ -43,11 +44,11 @@ internal class CodeGenerator(override val context: Context) : ContextUtils {
     val intPtrType = LLVMIntPtrType(llvmTargetData)!!
     private val immOneIntPtrType = LLVMConstInt(intPtrType, 1, 1)!!
 
-    fun prologue(descriptor: FunctionDescriptor) {
+    fun prologue(descriptor: FunctionDescriptor, line:Int = -1, column: Int = -1, scope: debugInfo.DIScopeOpaqueRef? = null) {
         val llvmFunction = llvmFunction(descriptor)
 
         prologue(llvmFunction,
-                LLVMGetReturnType(getLlvmFunctionType(descriptor))!!)
+                LLVMGetReturnType(getLlvmFunctionType(descriptor))!!, line, column, scope)
 
         if (!descriptor.isExported()) {
             LLVMSetLinkage(llvmFunction, LLVMLinkage.LLVMInternalLinkage)
@@ -60,7 +61,7 @@ internal class CodeGenerator(override val context: Context) : ContextUtils {
         functionDescriptor = descriptor
     }
 
-    fun prologue(function:LLVMValueRef, returnType:LLVMTypeRef) {
+    fun prologue(function:LLVMValueRef, returnType:LLVMTypeRef, line:Int = -1, column: Int = -1, scope: debugInfo.DIScopeOpaqueRef? = null) {
         assert(returns.size == 0)
         assert(this.function != function)
 
@@ -75,6 +76,9 @@ internal class CodeGenerator(override val context: Context) : ContextUtils {
         epilogueBb = LLVMAppendBasicBlock(function, "epilogue")
         cleanupLandingpad = LLVMAppendBasicBlock(function, "cleanup_landingpad")!!
         positionAtEnd(entryBb!!)
+        scope?.apply {
+            debugLocation(line, column, scope)
+        }
         slotsPhi = phi(kObjHeaderPtrPtr)
         // First slot can be assigned to keep pointer to frame local arena.
         slotCount = 1
@@ -84,7 +88,7 @@ internal class CodeGenerator(override val context: Context) : ContextUtils {
                 or(ptrToInt(slotsPhi, intPtrType), immOneIntPtrType), kObjHeaderPtrPtr)
     }
 
-    fun epilogue() {
+    fun epilogue(line:Int = -1, column: Int = -1, scope: debugInfo.DIScopeOpaqueRef? = null) {
         appendingTo(prologueBb!!) {
             val slots = if (needSlots)
                 LLVMBuildArrayAlloca(builder, kObjHeaderPtr, Int32(slotCount).llvm, "")!!
@@ -95,6 +99,9 @@ internal class CodeGenerator(override val context: Context) : ContextUtils {
                 val slotsMem = bitcast(kInt8Ptr, slots)
                 val pointerSize = LLVMABISizeOfType(llvmTargetData, kObjHeaderPtr).toInt()
                 val alignment = LLVMABIAlignmentOfType(llvmTargetData, kObjHeaderPtr)
+                scope?.apply {
+                    debugLocation(line, column, scope)
+                }
                 call(context.llvm.memsetFunction,
                         listOf(slotsMem, Int8(0).llvm,
                                 Int32(slotCount * pointerSize).llvm, Int32(alignment).llvm,
@@ -487,6 +494,20 @@ internal class CodeGenerator(override val context: Context) : ContextUtils {
     }
 
     fun  llvmFunction(function: FunctionDescriptor): LLVMValueRef = function.llvmFunction
+
+    internal fun resetDebugLocation() {
+        @Suppress("UNCHECKED_CAST")
+        debugInfo.LLVMBuilderResetDebugLocation(builder as debugInfo.LLVMBuilderRef)
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    internal fun debugLocation(line: Int, column: Int, scope:debugInfo.DIScopeOpaqueRef):DILocationRef? {
+        return debugInfo.LLVMBuilderSetDebugLocation(
+                builder as debugInfo.LLVMBuilderRef,
+                line,
+                column,
+                scope)
+    }
 
 }
 

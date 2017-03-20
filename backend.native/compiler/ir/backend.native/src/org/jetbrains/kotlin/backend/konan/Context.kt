@@ -412,5 +412,15 @@ internal class Context(config: KonanConfig) : KonanBackendContext(config) {
             println(message)
         }
     }
+
+    val  debugInfo = DebugInfo()
+    class DebugInfo {
+        val files = mutableMapOf<IrFile, debugInfo.DIFileRef>()
+        val subprograms = mutableMapOf<FunctionDescriptor, debugInfo.DISubprogramRef>()
+        var builder: debugInfo.DIBuilderRef? = null
+        var module: debugInfo.DIModuleRef? = null
+        var compilationModule: debugInfo.DICompileUnitRef? = null
+        var types = mutableMapOf<KotlinType, debugInfo.DITypeOpaqueRef>()
+    }
 }
 
