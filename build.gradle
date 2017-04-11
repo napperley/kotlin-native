@@ -68,7 +68,7 @@ void setupCompilationFlags() {
 
     if (isLinux()) {
         ext.targetArgs <<
-            ["host": 
+            ["host":
                ["--sysroot=${gccToolchainDir}/${gnuTriplet}/sysroot"],
              "raspberrypi":
                ["-target", "armv7-unknown-linux-gnueabihf",
@@ -76,12 +76,19 @@ void setupCompilationFlags() {
                 "--sysroot=$raspberryPiSysrootDir",
                 // TODO: those two are hacks.
                 "-I$raspberryPiSysrootDir/usr/include/c++/4.8.3",
-                "-I$raspberryPiSysrootDir/usr/include/c++/4.8.3/arm-linux-gnueabihf"]
+                "-I$raspberryPiSysrootDir/usr/include/c++/4.8.3/arm-linux-gnueabihf"],
+                "arm_cortex_m4":
+                  ["-target", "armv7-unknown-linux-gnueabihf",
+                   "-mfpu=vfp", "-mfloat-abi=hard",
+                   "--sysroot=$armCortexM4SysrootDir",
+                   // TODO: those two are hacks.
+                   "-I$armCortexM4SysrootDir/usr/include/c++/4.8.3",
+                   "-I$armCortexM4SysrootDir/usr/include/c++/4.8.3/arm-linux-gnueabihf"]
             ]
      } else {
          ext.targetArgs <<
             ["host":
-                ["--sysroot=$hostSysrootDir", "-mmacosx-version-min=$minMacOsVersion"], 
+                ["--sysroot=$hostSysrootDir", "-mmacosx-version-min=$minMacOsVersion"],
              "iphone":
                 ["-stdlib=libc++", "-arch", "arm64", "-isysroot", "$iphoneSysrootDir",
                  "-miphoneos-version-min=8.0.0"]
@@ -102,7 +109,7 @@ void setupCompilationFlags() {
         binDir = "$hostSysrootDir/usr/bin"
     }
     ext.clangArgs << "-B$binDir"
-    ext.hostClangArgs = ext.clangArgs.clone() 
+    ext.hostClangArgs = ext.clangArgs.clone()
     ext.hostClangArgs.addAll(ext.targetArgs['host'])
 
     ext.clangPath << binDir
@@ -225,13 +232,13 @@ task dist_compiler(type: Copy) {
         // MacOS System Integrity Protection strips DYLD_LIBRARY_PATH from
         // environment of all the binaries residing in /bin /usr/bin etc.
         // That means /usr/bin/java can't use DYLD_LIBRARY_PATH to pick up
-        // rpath'ed libraries. 
+        // rpath'ed libraries.
         // See dyld(1), install_name_tool(1) for rpath details.
 
         if (isMac()) {
             exec {
                 commandLine "install_name_tool"
-                args '-add_rpath', '@loader_path/', 
+                args '-add_rpath', '@loader_path/',
                     'dist/konan/nativelib/libclangstubs.dylib'
             }
         }
@@ -327,4 +334,3 @@ task clean {
         delete bundle.outputs.files
     }
 }
-

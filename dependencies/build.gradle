@@ -132,6 +132,12 @@ if (isLinux()) {
     task raspberrypiLibffi(type: HelperNativeDep) {
         baseName = "libffi-3.2.1-2-raspberrypi"
     }
+    task armCortexM4Sysroot(type: HelperNativeDep) {
+        baseName = "target-sysroot-1-arm-cortex-m4"
+    }
+    task armCortexM4Libffi(type: HelperNativeDep) {
+        baseName = "libffi-3.2.1-2-arm-cortex-m4"
+    }
 } else {
     task hostSysroot(type: HelperNativeDep) {
         baseName = "target-sysroot-1-$host"

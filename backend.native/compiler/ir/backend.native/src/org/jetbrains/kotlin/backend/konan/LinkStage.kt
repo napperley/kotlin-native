@@ -24,7 +24,7 @@ typealias BitcodeFile = String
 typealias ObjectFile = String
 typealias ExecutableFile = String
 
-// Use "clang -v -save-temps" to write linkCommand() method 
+// Use "clang -v -save-temps" to write linkCommand() method
 // for another implementation of this class.
 internal abstract class PlatformFlags(val distribution: Distribution) {
     val properties = distribution.properties
@@ -34,11 +34,11 @@ internal abstract class PlatformFlags(val distribution: Distribution) {
     abstract val llvmLtoFlags: List<String>
     abstract val llvmLlcFlags: List<String>
 
-    abstract val linker: String 
+    abstract val linker: String
     abstract val linkerKonanFlags: List<String>
     abstract val linkerOptimizationFlags: List<String>
 
-    abstract fun linkCommand(objectFiles: List<ObjectFile>, 
+    abstract fun linkCommand(objectFiles: List<ObjectFile>,
         executable: ExecutableFile, optimize: Boolean): List<String>
 }
 
@@ -51,7 +51,7 @@ internal open class MacOSPlatform(distribution: Distribution)
     override val llvmLtoFlags = properties.propertyList("llvmLtoFlags.osx")
     override val llvmLlcFlags = properties.propertyList("llvmLlcFlags.osx")
 
-    override val linkerOptimizationFlags = 
+    override val linkerOptimizationFlags =
         properties.propertyList("linkerOptimizationFlags.osx")
     override val linkerKonanFlags = properties.propertyList("linkerKonanFlags.osx")
     override val linker = "${distribution.sysRoot}/usr/bin/ld"
@@ -70,7 +70,7 @@ internal open class MacOSPlatform(distribution: Distribution)
             osVersionMin +
             listOf("-syslibroot", "$targetSysRoot",
             "-o", executable) +
-            objectFiles + 
+            objectFiles +
             if (optimize) linkerOptimizationFlags else {listOf<String>()} +
             linkerKonanFlags +
             listOf("-lSystem")
@@ -108,30 +108,30 @@ internal open class LinuxPlatform(distribution: Distribution)
     override val llvmLtoFlags = properties.propertyList("llvmLtoFlags.linux")
     override val llvmLlcFlags = properties.propertyList("llvmLlcFlags.linux")
 
-    override val linkerOptimizationFlags = 
+    override val linkerOptimizationFlags =
         properties.propertyList("linkerOptimizationFlags.linux")
     override val linkerKonanFlags = properties.propertyList("linkerKonanFlags.linux")
     override val linker = "${distribution.sysRoot}/../bin/ld.gold"
 
-    val pluginOptimizationFlags = 
+    val pluginOptimizationFlags =
         properties.propertyList("pluginOptimizationFlags.linux")
 
     override fun linkCommand(objectFiles: List<String>, executable: String, optimize: Boolean): List<String> {
         // TODO: Can we extract more to the konan.properties?
         return mutableListOf<String>("$linker",
             "--sysroot=${sysRoot}",
-            "-export-dynamic", "-z", "relro", "--hash-style=gnu", 
+            "-export-dynamic", "-z", "relro", "--hash-style=gnu",
             "--build-id", "--eh-frame-hdr", "-m", "elf_x86_64",
             "-dynamic-linker", "/lib64/ld-linux-x86-64.so.2",
             "-o", executable,
             "${sysRoot}/usr/lib64/crt1.o", "${sysRoot}/usr/lib64/crti.o", "${libGcc}/crtbegin.o",
             "-L${llvmLib}", "-L${libGcc}", "-L${sysRoot}/../lib64", "-L${sysRoot}/lib64",
-            "-L${sysRoot}/usr/lib64", "-L${sysRoot}/../lib", "-L${sysRoot}/lib", "-L${sysRoot}/usr/lib") + 
+            "-L${sysRoot}/usr/lib64", "-L${sysRoot}/../lib", "-L${sysRoot}/lib", "-L${sysRoot}/usr/lib") +
             if (optimize) listOf("-plugin", "$llvmLib/LLVMgold.so") + pluginOptimizationFlags else {listOf<String>()} +
             objectFiles +
             if (optimize) linkerOptimizationFlags else {listOf<String>()} +
             linkerKonanFlags +
-            listOf("-lgcc", "--as-needed", "-lgcc_s", "--no-as-needed", 
+            listOf("-lgcc", "--as-needed", "-lgcc_s", "--no-as-needed",
             "-lc", "-lgcc", "--as-needed", "-lgcc_s", "--no-as-needed",
             "${libGcc}/crtend.o",
             "${sysRoot}/usr/lib64/crtn.o")
@@ -142,6 +142,30 @@ internal class RaspberryPiPlatform(distribution: Distribution)
     : LinuxPlatform(distribution) {
 
     override val sysRoot = "${distribution.dependenciesDir}/${properties.propertyString("targetSysRoot.linux-raspberrypi")!!}"
+
+    override fun linkCommand(objectFiles: List<String>, executable: String, optimize: Boolean): List<String> {
+        // TODO: Can we extract more to the konan.properties?
+        return mutableListOf<String>("$linker",
+            "--sysroot=${sysRoot}",
+            "-export-dynamic", "-z", "relro", "--hash-style=gnu",
+            "--build-id", "--eh-frame-hdr",
+            "-dynamic-linker", "/lib/ld-linux-armhf.so.3",
+            "-o", executable,
+            "${sysRoot}/usr/lib/crt1.o", "${sysRoot}/usr/lib/crti.o", "${libGcc}/crtbegin.o",
+            "-L${llvmLib}", "-L${libGcc}", "-L${sysRoot}/../lib/arm-linux-gnueabihf", "-L${sysRoot}/lib/arm-linux-gnueabihf",
+            "-L${sysRoot}/usr/lib/arm-linux-gnueabihf", "-L${sysRoot}/../lib", "-L${sysRoot}/lib", "-L${sysRoot}/usr/lib") +
+            if (optimize) listOf("-plugin", "$llvmLib/LLVMgold.so") + pluginOptimizationFlags else {listOf<String>()} +
+            objectFiles +
+            if (optimize) linkerOptimizationFlags else {listOf<String>()} +
+            linkerKonanFlags +
+            listOf("-lgcc", "-lgcc_s", "-lc", "${libGcc}/crtend.o", "${sysRoot}/usr/lib/crtn.o")
+    }
+}
+
+internal class ArmCortexM4Platform(distribution: Distribution)
+    : LinuxPlatform(distribution) {
+
+    override val sysRoot = "${distribution.dependenciesDir}/${properties.propertyString("targetSysRoot.arm-cortex-m4")!!}"
 
     override fun linkCommand(objectFiles: List<String>, executable: String, optimize: Boolean): List<String> {
         // TODO: Can we extract more to the konan.properties?
@@ -175,6 +199,7 @@ internal class LinkStage(val context: Context) {
         KonanTarget.LINUX -> when (targetManager.current) {
             KonanTarget.LINUX -> LinuxPlatform(distribution)
             KonanTarget.RASPBERRYPI -> RaspberryPiPlatform(distribution)
+            KonanTarget.ARM_CORTEX_M4 -> ArmCortexM4Platform(distribution)
             else -> TODO("Target not implemented yet.")
         }
         KonanTarget.MACBOOK -> when (targetManager.current) {
@@ -240,15 +265,15 @@ internal class LinkStage(val context: Context) {
         return result
     }
 
-    // Ideally we'd want to have 
+    // Ideally we'd want to have
     //      #pragma weak main = Konan_main
     // in the launcher.cpp.
     // Unfortunately, anything related to weak linking on MacOS
     // only seems to be working with dynamic libraries.
     // So we stick to "-alias _main _konan_main" on Mac.
     // And just do the same on Linux.
-    val entryPointSelector: List<String> 
-        get() = if (nomain) listOf() 
+    val entryPointSelector: List<String>
+        get() = if (nomain) listOf()
                 else properties.propertyList("entrySelector.$suffix")
 
     fun link(objectFiles: List<ObjectFile>): ExecutableFile {
@@ -288,7 +313,7 @@ internal class LinkStage(val context: Context) {
     fun linkStage() {
         context.log("# Compiler root: ${distribution.konanHome}")
 
-        val bitcodeFiles = listOf<BitcodeFile>(emitted, distribution.start, 
+        val bitcodeFiles = listOf<BitcodeFile>(emitted, distribution.start,
             distribution.runtime, distribution.launcher) + libraries
 
         var objectFiles: List<String> = listOf()
@@ -308,4 +333,3 @@ internal class LinkStage(val context: Context) {
         }
     }
 }
-
