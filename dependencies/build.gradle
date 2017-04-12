@@ -113,6 +113,16 @@ class HelperNativeDep extends TgzNativeDep {
     }
 }
 
+class HelperLocalNativeDep extends HelperNativeDep {
+    String getBaseUrl() {
+        def homeDir = System.getProperty("user.home")
+        // TODO: Get path to dependencies directory from a properties file.
+        // TODO: Remove the line below
+        println("Local Native Dependency: $homeDir/kotlin_native_dependencies")
+        return "$homeDir/kotlin_native_dependencies"
+    }
+}
+
 
 task hostLibffi(type: HelperNativeDep) {
     baseName = "libffi-3.2.1-2-$host"
@@ -132,10 +142,10 @@ if (isLinux()) {
     task raspberrypiLibffi(type: HelperNativeDep) {
         baseName = "libffi-3.2.1-2-raspberrypi"
     }
-    task beagleboneBlackSysroot(type: HelperNativeDep) {
+    task beagleboneBlackSysroot(type: HelperLocalNativeDep) {
         baseName = "target-sysroot-1-beaglebone-black"
     }
-    task beagleboneBlackLibffi(type: HelperNativeDep) {
+    task beagleboneBlackLibffi(type: HelperLocalNativeDep) {
         baseName = "libffi-3.2.1-2-beaglebone-black"
     }
 } else {

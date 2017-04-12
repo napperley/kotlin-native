@@ -77,7 +77,7 @@ void setupCompilationFlags() {
                 // TODO: those two are hacks.
                 "-I$raspberryPiSysrootDir/usr/include/c++/4.8.3",
                 "-I$raspberryPiSysrootDir/usr/include/c++/4.8.3/arm-linux-gnueabihf"],
-                "beaglebone_black":
+                "beagleboneBlack":
                   ["-target", "armv7-unknown-linux-gnueabihf",
                    "-mfpu=vfp", "-mfloat-abi=hard",
                    "--sysroot=$beagleboneBlackSysrootDir",
