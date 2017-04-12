@@ -74,7 +74,8 @@ private val knownTargets = mapOf(
     "macbook" to "osx",
     "iphone" to "osx-ios",
     "iphone_sim" to "osx-ios-sim",
-    "raspberrypi" to "linux-raspberrypi")
+    "raspberrypi" to "linux-raspberrypi",
+    "beaglebone_black" to "beaglebone-black")
 
 
 private fun String.targetSuffix(): String =
@@ -119,7 +120,7 @@ private fun <T> Collection<T>.atMostOne(): T? {
     }
 }
 
-private fun Properties.getOsSpecific(name: String, 
+private fun Properties.getOsSpecific(name: String,
     host: String = detectHost()): String? {
 
     return this.getProperty("$name.$host")
@@ -190,28 +191,28 @@ private fun Properties.defaultCompilerOpts(target: String, dependencies: String)
     val dependencyList = getOsSpecific("dependencies", target)?.split(' ') ?: listOf<String>()
     maybeExecuteHelper(dependencies, this, dependencyList)
 
-    // StubGenerator passes the arguments to libclang which 
-    // works not exactly the same way as the clang binary and 
+    // StubGenerator passes the arguments to libclang which
+    // works not exactly the same way as the clang binary and
     // (in particular) uses different default header search path.
     // See e.g. http://lists.llvm.org/pipermail/cfe-dev/2013-November/033680.html
     // We workaround the problem with -isystem flag below.
     val isystem = "$llvmHome/lib/clang/$llvmVersion/include"
 
     when (target) {
-        "osx" -> 
+        "osx" ->
             return listOf(
                 "-isystem", isystem,
                 "-B$hostSysRoot/usr/bin",
                 "--sysroot=$sysRoot",
                 "-mmacosx-version-min=10.11")
-        "osx-ios" -> 
+        "osx-ios" ->
             return listOf(
                 "-arch", "arm64",
                 "-isystem", isystem,
                 "-B$hostSysRoot/usr/bin",
                 "--sysroot=$sysRoot",
                 "-miphoneos-version-min=5.0.0")
-        "osx-ios-sim" -> 
+        "osx-ios-sim" ->
             return listOf(
                 "-arch", "x86_64",
                 "-isystem", isystem,
@@ -230,6 +231,18 @@ private fun Properties.defaultCompilerOpts(target: String, dependencies: String)
                 "--sysroot=$sysRoot")
         }
         "linux-raspberrypi" -> {
+            val gccToolChainDir = this.getOsSpecific("gccToolChain", target)!!
+            val gccToolChain= "$dependencies/$gccToolChainDir"
+
+            return listOf(
+                "-target", "armv7-unknown-linux-gnueabihf",
+                "-isystem", isystem,
+                "--gcc-toolchain=$gccToolChain",
+                "-L$llvmHome/lib",
+                "-B$hostSysRoot/../bin",
+                "--sysroot=$sysRoot")
+        }
+        "linux-beaglebone-black" -> {
             val gccToolChainDir = this.getOsSpecific("gccToolChain", target)!!
             val gccToolChain= "$dependencies/$gccToolChainDir"
 
@@ -304,17 +317,17 @@ private fun processLib(konanHome: String,
 
     val defaultOpts = konanProperties.defaultCompilerOpts(target, dependencies)
     val headerFiles = config.getSpaceSeparated("headers") + additionalHeaders
-    val compilerOpts = 
+    val compilerOpts =
         config.getSpaceSeparated("compilerOpts") +
-        defaultOpts + additionalCompilerOpts 
+        defaultOpts + additionalCompilerOpts
     val compiler = "clang"
     val language = Language.C
     val excludeSystemLibs = config.getProperty("excludeSystemLibs")?.toBoolean() ?: false
 
     val entryPoint = config.getSpaceSeparated("entryPoint").atMostOne()
-    val linkerOpts = 
+    val linkerOpts =
         config.getSpaceSeparated("linkerOpts").toTypedArray() +
-        defaultOpts + additionalLinkerOpts 
+        defaultOpts + additionalLinkerOpts
     val linker = args["-linker"]?.atMostOne() ?: config.getProperty("linker") ?: "clang"
     val excludedFunctions = config.getSpaceSeparated("excludedFunctions").toSet()
 

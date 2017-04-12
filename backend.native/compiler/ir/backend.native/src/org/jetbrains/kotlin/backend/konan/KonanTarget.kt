@@ -24,7 +24,8 @@ enum class KonanTarget(var enabled: Boolean = false) {
     IPHONE_SIM,
     LINUX,
     MACBOOK,
-    RASPBERRYPI
+    RASPBERRYPI,
+    BEAGLEBONE_BLACK
 }
 
 class TargetManager(val config: CompilerConfiguration) {
@@ -36,6 +37,7 @@ class TargetManager(val config: CompilerConfiguration) {
             KonanTarget.LINUX   -> {
                 KonanTarget.LINUX.enabled = true
                 KonanTarget.RASPBERRYPI.enabled = true
+                KonanTarget.BEAGLEBONE_BLACK.enabled = true
             }
             KonanTarget.MACBOOK -> {
                 KonanTarget.MACBOOK.enabled = true
@@ -57,7 +59,7 @@ class TargetManager(val config: CompilerConfiguration) {
     }
 
     fun list() {
-        targets.forEach { key, target -> 
+        targets.forEach { key, target ->
             if (target.enabled) {
                 val isDefault = if (target == current) "(default)" else ""
                 println(String.format("%1$-30s%2$-10s", "$key:", "$isDefault"))
@@ -87,6 +89,7 @@ class TargetManager(val config: CompilerConfiguration) {
             when (current) {
                 KonanTarget.LINUX -> return("linux")
                 KonanTarget.RASPBERRYPI -> return("linux-raspberrypi")
+                KonanTarget.BEAGLEBONE_BLACK -> return("linux-beaglebone-black")
                 KonanTarget.IPHONE -> return("linux-ios")
                 KonanTarget.IPHONE_SIM -> return("linux-ios-sim")
                 else -> error("Impossible combination of $host and $current")
@@ -101,11 +104,11 @@ class TargetManager(val config: CompilerConfiguration) {
             return when (javaOsName) {
                 "Mac OS X" -> "osx"
                 "Linux"    -> "linux"
-                else -> error("Unknown operating system: ${javaOsName}") 
+                else -> error("Unknown operating system: ${javaOsName}")
             }
         }
 
-        fun host_arch(): String { 
+        fun host_arch(): String {
             val javaArch = System.getProperty("os.arch")
             return when (javaArch) {
                 "x86_64" -> "x86_64"
@@ -124,4 +127,3 @@ class TargetManager(val config: CompilerConfiguration) {
 
     val crossCompile = (host != current)
 }
-

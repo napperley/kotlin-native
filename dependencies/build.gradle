@@ -132,6 +132,12 @@ if (isLinux()) {
     task raspberrypiLibffi(type: HelperNativeDep) {
         baseName = "libffi-3.2.1-2-raspberrypi"
     }
+    task beagleboneBlackSysroot(type: HelperNativeDep) {
+        baseName = "target-sysroot-1-beaglebone-black"
+    }
+    task beagleboneBlackLibffi(type: HelperNativeDep) {
+        baseName = "libffi-3.2.1-2-beaglebone-black"
+    }
 } else {
     task hostSysroot(type: HelperNativeDep) {
         baseName = "target-sysroot-1-$host"
