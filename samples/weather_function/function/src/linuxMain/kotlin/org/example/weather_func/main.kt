@@ -15,7 +15,8 @@ import kotlin.system.exitProcess
 
 private val API_KEY by lazy { fetchApiKey() }
 
-fun main(args: Array<String>) {
+@ExperimentalUnsignedTypes
+fun main() {
 	val input = readLine()
 	val location = fetchLocationArg(input)
 	val jsonFile = fetchJsonFileArg(input)
@@ -52,6 +53,7 @@ private fun checkFile(file: String) {
 	}
 }
 
+@ExperimentalUnsignedTypes
 private fun fetchJson(jsonFile: String): String {
 	var result = ""
 	// Open the file using the fopen function and store the file handle.
@@ -63,7 +65,7 @@ private fun fetchJson(jsonFile: String): String {
 	memScoped {
 		val buffer = allocArray<ByteVar>(fileSize)
 		// Read the entire file and store the contents into the buffer.
-		fread(buffer, fileSize, 1, file)
+		fread(buffer, fileSize.toULong(), 1uL, file)
 		result = buffer.toKString()
 	}
 	// Close the file.
@@ -71,6 +73,7 @@ private fun fetchJson(jsonFile: String): String {
 	return result
 }
 
+@ExperimentalUnsignedTypes
 private fun printJsonFile(jsonFile: String) {
 	println("Printing from JSON file ($jsonFile)...")
 	val weather = createWeatherFromJson(fetchJson(jsonFile))
@@ -78,6 +81,7 @@ private fun printJsonFile(jsonFile: String) {
 	println("Weather JSON:\n${weatherToJsonString(weather)}")
 }
 
+@ExperimentalUnsignedTypes
 private fun printFromWeatherService(location: String) {
 	println("Fetching weather information (for $location)...")
 	val curl = CUrl(createUrl(location)).apply {

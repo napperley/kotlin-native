@@ -5,33 +5,15 @@
 
 package org.example.weather_func
 
-import org.example.weather_func.Event
+import curl.*
+import kotlinx.cinterop.*
 import platform.posix.size_t
-
-import curl.curl_easy_setopt
-import curl.CURLOPT_URL
-import curl.CURLOPT_HEADERFUNCTION
-import curl.CURLOPT_HEADERDATA
-import curl.CURLOPT_WRITEFUNCTION
-import curl.CURLOPT_WRITEDATA
-import curl.curl_easy_cleanup
-import curl.curl_easy_init
-import curl.CURLE_OK
-import curl.curl_easy_strerror
-import curl.curl_easy_perform
-
-import kotlinx.cinterop.staticCFunction
-import kotlinx.cinterop.COpaquePointer
-import kotlinx.cinterop.CPointer
-import kotlinx.cinterop.StableRef
-import kotlinx.cinterop.asStableRef
-import kotlinx.cinterop.ByteVar
-import kotlinx.cinterop.readBytes
 
 /**
  * Provides basic HTTP client functionality through the libCurl library.
 */
-internal class CUrl(val url: String) {
+@ExperimentalUnsignedTypes
+internal class CUrl(url: String) {
     private val stableRef = StableRef.create(this)
     private val curlObj = curl_easy_init()
     val header = Event<String>()
@@ -67,8 +49,9 @@ internal class CUrl(val url: String) {
     }
 }
 
+@ExperimentalUnsignedTypes
 fun headerCallback(buffer: CPointer<ByteVar>?, size: size_t, totalItems: size_t, userData: COpaquePointer?): size_t {
-    var responseSize = 0L
+    var responseSize = 0uL
     if (buffer != null && userData != null) {
         val header = buffer.toKString((size * totalItems).toInt()).trim()
         val curlRef = userData.asStableRef<CUrl>().get()
@@ -79,8 +62,9 @@ fun headerCallback(buffer: CPointer<ByteVar>?, size: size_t, totalItems: size_t,
     return responseSize
 }
 
+@ExperimentalUnsignedTypes
 fun writeCallback(buffer: CPointer<ByteVar>?, size: size_t, totalItems: size_t, userData: COpaquePointer?): size_t {
-    var responseSize = 0L
+    var responseSize = 0uL
     if (buffer != null && userData != null) {
         val data = buffer.toKString((size * totalItems).toInt()).trim()
         val curlRef = userData.asStableRef<CUrl>().get()
