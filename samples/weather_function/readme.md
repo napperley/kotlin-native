@@ -1,6 +1,6 @@
 # Weather Function Sample
 
-This is a Serverless Function that fetches the current weather information from the Open Weather Map [service](https://openweathermap.org/current) via HTTP. Part of the Function's output includes HTTP response headers, and the HTTP response body. This sample is designed to be deployed on OpenFaaS via a Docker image, in conjunction with Docker Swarm.
+This is a Serverless Function that fetches the current weather information from the Open Weather Map [service](https://openweathermap.org/current) via HTTP. Part of the Function's output includes HTTP response headers, and the HTTP response body. This sample is designed to be deployed on OpenFaaS via a Docker image, in conjunction with [Docker Swarm](https://docs.docker.com/engine/swarm/).
 
 
 # Initial Setup
@@ -23,10 +23,15 @@ It will be assumed that [Docker](https://store.docker.com/search?type=edition&of
 
 # Usage
 
-Make sure that you have completed the *Building Docker Image* section before proceeding.
+Make sure that you have completed the [Building Docker Image](#Building-Docker-Image) section before proceeding.
 
 1. Start OpenFaaS
 2. Deploy the **weather** image using the **faas-cli** tool: `faas-cli deploy --image weather --name weather`
 3. Invoke the **weather** function (including passing through the location argument) by running the following: `echo '-l="christchurch,nz"' | faas-cli invoke weather`
 
-**Note:** The program (weather) can print weather information from a JSON file, eg: `./weather -f="current_weather.json"`. This functionality isn't available in the Serverless Function unless the file is generated in the **~/repos/kotlin-native/samples/weather_function/function** directory, the Dockerfile is updated to include the file in the Docker image, and the image is built (refer to the *Building Docker Image* section) before deploying the image (refer to the *Usage* section).
+**Note:** The program (weather) can print weather information from a JSON file, eg: `./weather -f="current_weather.json"`. This functionality isn't available in the Serverless Function unless the following has been done:
+
+1. JSON file is generated in the **~/repos/kotlin-native/samples/weather_function/function** directory
+2. Dockerfile is updated to include the JSON file in the Docker image
+3. Image is built (refer to the [Building Docker Image](#Building-Docker-Image) section)
+4. The built image is deployed (refer to the [Usage](#Usage) section)
