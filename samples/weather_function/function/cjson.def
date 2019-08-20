@@ -2,4 +2,4 @@ package = cjson
 headers = cJSON.h
 compilerOpts = -std=c89
 compilerOpts.linux = -I/app/lib/cJSON-1.7.12/include/cjson
-linkerOpts.linux = -L/app/lib/cJSON-1.7.12/lib -lcjson
+linkerOpts.linux = -L/usr/lib -lcjson

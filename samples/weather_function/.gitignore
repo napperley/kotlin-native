@@ -15,3 +15,4 @@ gradle/
 gradlew
 template/
 function/lib/
+function/current_weather.json
