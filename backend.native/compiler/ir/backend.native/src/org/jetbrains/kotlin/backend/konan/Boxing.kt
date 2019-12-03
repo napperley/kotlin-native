@@ -6,8 +6,6 @@
 package org.jetbrains.kotlin.backend.konan
 
 import llvm.*
-import org.jetbrains.kotlin.backend.common.descriptors.WrappedSimpleFunctionDescriptor
-import org.jetbrains.kotlin.backend.common.descriptors.WrappedValueParameterDescriptor
 import org.jetbrains.kotlin.backend.konan.ir.KonanSymbols
 import org.jetbrains.kotlin.backend.konan.llvm.*
 import org.jetbrains.kotlin.descriptors.Modality
@@ -16,6 +14,8 @@ import org.jetbrains.kotlin.ir.declarations.*
 import org.jetbrains.kotlin.ir.declarations.impl.IrFunctionImpl
 import org.jetbrains.kotlin.ir.declarations.impl.IrValueParameterImpl
 import org.jetbrains.kotlin.ir.descriptors.IrBuiltIns
+import org.jetbrains.kotlin.ir.descriptors.WrappedSimpleFunctionDescriptor
+import org.jetbrains.kotlin.ir.descriptors.WrappedValueParameterDescriptor
 import org.jetbrains.kotlin.ir.symbols.IrSimpleFunctionSymbol
 import org.jetbrains.kotlin.ir.symbols.impl.IrSimpleFunctionSymbolImpl
 import org.jetbrains.kotlin.ir.symbols.impl.IrValueParameterSymbolImpl
@@ -71,7 +71,10 @@ internal val Context.getBoxFunction: (IrClass) -> IrSimpleFunction by Context.la
             isInline = false,
             isExternal = false,
             isTailrec = false,
-            isSuspend = false
+            isSuspend = false,
+            isExpect = false,
+            isFakeOverride = false,
+            isOperator = false
     ).also { function ->
         function.valueParameters.add(WrappedValueParameterDescriptor().let {
             IrValueParameterImpl(
@@ -122,7 +125,10 @@ internal val Context.getUnboxFunction: (IrClass) -> IrSimpleFunction by Context.
             isInline = false,
             isExternal = false,
             isTailrec = false,
-            isSuspend = false
+            isSuspend = false,
+            isExpect = false,
+            isFakeOverride = false,
+            isOperator = false
     ).also { function ->
         function.valueParameters.add(WrappedValueParameterDescriptor().let {
             IrValueParameterImpl(
@@ -150,7 +156,7 @@ internal val Context.getUnboxFunction: (IrClass) -> IrSimpleFunction by Context.
  * If output target is native binary then the cache is created.
  */
 internal fun initializeCachedBoxes(context: Context) {
-    if (context.config.produce.isNativeBinary) {
+    if (context.producedLlvmModuleContainsStdlib) {
         BoxCache.values().forEach { cache ->
             val cacheName = "${cache.name}_CACHE"
             val rangeStart = "${cache.name}_RANGE_FROM"

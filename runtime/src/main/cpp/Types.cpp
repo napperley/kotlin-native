@@ -38,16 +38,17 @@ KBoolean IsInstance(const ObjHeader* obj, const TypeInfo* type_info) {
   return obj_type_info != nullptr;
 }
 
+KBoolean IsInstanceOfClassFast(const ObjHeader* obj, int32_t lo, int32_t hi) {
+  // We assume null check is handled by caller.
+  RuntimeAssert(obj != nullptr, "must not be null");
+  const TypeInfo* obj_type_info = obj->type_info();
+  // Super type's interval should contain our interval.
+  return obj_type_info->classId_ >= lo && obj_type_info->classId_ <= hi;
+}
+
 KBoolean IsArray(KConstRef obj) {
   RuntimeAssert(obj != nullptr, "Object must not be null");
   return obj->type_info()->instanceSize_ < 0;
-}
-
-void CheckInstance(const ObjHeader* obj, const TypeInfo* type_info) {
-  if (IsInstance(obj, type_info)) {
-    return;
-  }
-  ThrowClassCastException(obj, type_info);
 }
 
 KBoolean Kotlin_TypeInfo_isInstance(KConstRef obj, KNativePtr typeInfo) {
@@ -90,6 +91,21 @@ bool IsSubInterface(const TypeInfo* thiz, const TypeInfo* other) {
   }
 
   return false;
+}
+
+KVector4f Kotlin_Vector4f_of(KFloat f0, KFloat f1, KFloat f2, KFloat f3) {
+	return {f0, f1, f2, f3};
+}
+
+/*
+ * In the current design all simd types are mapped internally to floating type, e.g. <4 x float>.
+ * However, some platforms (ex. arm32) have different calling convention for <4 x float> and <4 x i32>.
+ * To avoid illegal bitcast from/to function types the following function
+ * return type MUST be <4 x float> and explicit type cast is done on the variable type.
+ */
+KVector4f Kotlin_Vector4i32_of(KInt f0, KInt f1, KInt f2, KInt f3) {
+	KInt __attribute__ ((__vector_size__(16))) v4i = {f0, f1, f2, f3};
+	return (KVector4f)v4i;
 }
 
 }  // extern "C"

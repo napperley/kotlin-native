@@ -32,6 +32,12 @@ class KonanConfigKeys {
                 = CompilerConfigurationKey.create("fully qualified main() name")
         val EXPORTED_LIBRARIES: CompilerConfigurationKey<List<String>>
                 = CompilerConfigurationKey.create<List<String>>("libraries included into produced framework API")
+        val LIBRARIES_TO_CACHE: CompilerConfigurationKey<List<String>>
+                = CompilerConfigurationKey.create<List<String>>("paths to libraries that to be compiled to cache")
+        val CACHE_DIRECTORIES: CompilerConfigurationKey<List<String>>
+                = CompilerConfigurationKey.create<List<String>>("paths to directories containing caches")
+        val CACHED_LIBRARIES: CompilerConfigurationKey<Map<String, String>>
+                = CompilerConfigurationKey.create<Map<String, String>>("mapping from library paths to cache paths")
         val FRAMEWORK_IMPORT_HEADERS: CompilerConfigurationKey<List<String>>
                 = CompilerConfigurationKey.create<List<String>>("headers imported to framework header")
         val FRIEND_MODULES: CompilerConfigurationKey<List<String>>
@@ -66,6 +72,8 @@ class KonanConfigKeys {
                 = CompilerConfigurationKey.create("native library file paths")
         val NODEFAULTLIBS: CompilerConfigurationKey<Boolean>
                 = CompilerConfigurationKey.create("don't link with the default libraries")
+        val NOENDORSEDLIBS: CompilerConfigurationKey<Boolean>
+                = CompilerConfigurationKey.create("don't link with the endorsed libraries")
         val NOMAIN: CompilerConfigurationKey<Boolean> 
                 = CompilerConfigurationKey.create("assume 'main' entry point to be provided by external libraries")
         val NOSTDLIB: CompilerConfigurationKey<Boolean> 
@@ -94,10 +102,12 @@ class KonanConfigKeys {
                 = CompilerConfigurationKey.create("library search path repositories")
         val RUNTIME_FILE: CompilerConfigurationKey<String?> 
                 = CompilerConfigurationKey.create("override default runtime file path")
+        val INCLUDED_LIBRARIES: CompilerConfigurationKey<List<String>>
+                = CompilerConfigurationKey("klibs processed in the same manner as source files")
         val SOURCE_MAP: CompilerConfigurationKey<List<String>> 
                 = CompilerConfigurationKey.create("generate source map")
         val STATIC_FRAMEWORK: CompilerConfigurationKey<Boolean>
-                = CompilerConfigurationKey.create("Produce a static library for a framework")
+                = CompilerConfigurationKey.create("produce a static library for a framework")
         val TARGET: CompilerConfigurationKey<String?>
                 = CompilerConfigurationKey.create("target we compile for")
         val TEMPORARY_FILES_DIR: CompilerConfigurationKey<String?>

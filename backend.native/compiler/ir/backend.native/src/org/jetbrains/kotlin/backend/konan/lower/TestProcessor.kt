@@ -5,9 +5,6 @@
 
 package org.jetbrains.kotlin.backend.konan.lower
 
-import org.jetbrains.kotlin.backend.common.descriptors.WrappedClassConstructorDescriptor
-import org.jetbrains.kotlin.backend.common.descriptors.WrappedClassDescriptor
-import org.jetbrains.kotlin.backend.common.descriptors.WrappedSimpleFunctionDescriptor
 import org.jetbrains.kotlin.backend.common.ir.addFakeOverrides
 import org.jetbrains.kotlin.backend.common.ir.createDispatchReceiverParameter
 import org.jetbrains.kotlin.backend.common.ir.createParameterDeclarations
@@ -17,6 +14,7 @@ import org.jetbrains.kotlin.backend.common.reportWarning
 import org.jetbrains.kotlin.backend.konan.Context
 import org.jetbrains.kotlin.backend.konan.descriptors.isAbstract
 import org.jetbrains.kotlin.backend.konan.descriptors.synthesizedName
+import org.jetbrains.kotlin.backend.konan.getIncludedLibraryDescriptors
 import org.jetbrains.kotlin.backend.konan.ir.typeWithStarProjections
 import org.jetbrains.kotlin.backend.konan.ir.typeWithoutArguments
 import org.jetbrains.kotlin.backend.konan.reportCompilationError
@@ -27,6 +25,9 @@ import org.jetbrains.kotlin.ir.declarations.*
 import org.jetbrains.kotlin.ir.declarations.impl.IrClassImpl
 import org.jetbrains.kotlin.ir.declarations.impl.IrConstructorImpl
 import org.jetbrains.kotlin.ir.declarations.impl.IrFunctionImpl
+import org.jetbrains.kotlin.ir.descriptors.WrappedClassConstructorDescriptor
+import org.jetbrains.kotlin.ir.descriptors.WrappedClassDescriptor
+import org.jetbrains.kotlin.ir.descriptors.WrappedSimpleFunctionDescriptor
 import org.jetbrains.kotlin.ir.expressions.impl.*
 import org.jetbrains.kotlin.ir.symbols.*
 import org.jetbrains.kotlin.ir.symbols.impl.IrClassSymbolImpl
@@ -105,7 +106,6 @@ internal class TestProcessor (val context: Context) {
                             it.function.endOffset,
                             registerTestCase.valueParameters[1].type,
                             it.function.symbol,
-                            it.function.descriptor,
                             typeArgumentsCount = 0,
                             valueArgumentsCount = 0))
                     putValueArgument(2, irBoolean(it.ignored))
@@ -126,7 +126,6 @@ internal class TestProcessor (val context: Context) {
                             it.function.endOffset,
                             registerFunction.valueParameters[1].type,
                             it.function.symbol,
-                            it.function.descriptor,
                             typeArgumentsCount = 0,
                             valueArgumentsCount = 0))
                 }
@@ -348,7 +347,10 @@ internal class TestProcessor (val context: Context) {
                 isInline = false,
                 isExternal = false,
                 isTailrec = false,
-                isSuspend = false
+                isSuspend = false,
+                isExpect = false,
+                isFakeOverride = false,
+                isOperator = false
         ).apply {
             descriptor.bind(this)
             parent = owner
@@ -384,7 +386,10 @@ internal class TestProcessor (val context: Context) {
                 isInline = false,
                 isExternal = false,
                 isTailrec = false,
-                isSuspend = false
+                isSuspend = false,
+                isExpect = false,
+                isFakeOverride = false,
+                isOperator = false
         ).apply {
             descriptor.bind(this)
             parent = owner
@@ -429,7 +434,8 @@ internal class TestProcessor (val context: Context) {
                 testSuite.typeWithStarProjections,
                 isInline = false,
                 isExternal = false,
-                isPrimary = true
+                isPrimary = true,
+                isExpect = false
         ).apply {
             descriptor.bind(this)
             parent = owner
@@ -484,7 +490,8 @@ internal class TestProcessor (val context: Context) {
                 isInner = false,
                 isData = false,
                 isExternal = false,
-                isInline = false
+                isInline = false,
+                isExpect = false
         ).apply {
             descriptor.bind(this)
             createParameterDeclarations()
@@ -600,10 +607,17 @@ internal class TestProcessor (val context: Context) {
     }
     // endregion
 
+    private fun shouldProcessFile(irFile: IrFile): Boolean = irFile.packageFragmentDescriptor.module.let {
+        // Process test annotations in source libraries too.
+        it == context.moduleDescriptor || it in context.getIncludedLibraryDescriptors()
+    }
+
     fun process(irFile: IrFile) {
         // TODO: uses descriptors.
-        if (irFile.packageFragmentDescriptor.module != context.moduleDescriptor)
+        if (!shouldProcessFile(irFile)) {
             return
+        }
+
         val annotationCollector = AnnotationCollector(irFile)
         irFile.acceptChildrenVoid(annotationCollector)
         createTestSuites(irFile, annotationCollector)

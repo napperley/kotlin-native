@@ -12,7 +12,9 @@ internal fun determineLinkerOutput(context: Context): LinkerOutputKind =
                 val staticFramework = context.config.produceStaticFramework
                 if (staticFramework) LinkerOutputKind.STATIC_LIBRARY else LinkerOutputKind.DYNAMIC_LIBRARY
             }
+            CompilerOutputKind.DYNAMIC_CACHE,
             CompilerOutputKind.DYNAMIC -> LinkerOutputKind.DYNAMIC_LIBRARY
+            CompilerOutputKind.STATIC_CACHE,
             CompilerOutputKind.STATIC -> LinkerOutputKind.STATIC_LIBRARY
             CompilerOutputKind.PROGRAM -> LinkerOutputKind.EXECUTABLE
             else -> TODO("${context.config.produce} should not reach native linker stage")
@@ -24,21 +26,10 @@ internal class Linker(val context: Context) {
     private val platform = context.config.platform
     private val config = context.config.configuration
     private val linkerOutput = determineLinkerOutput(context)
-    private val nomain = config.get(KonanConfigKeys.NOMAIN) ?: false
     private val linker = platform.linker
     private val target = context.config.target
     private val optimize = context.shouldOptimize()
     private val debug = context.config.debug || context.config.lightDebug
-
-    // Ideally we'd want to have
-    //      #pragma weak main = Konan_main
-    // in the launcher.cpp.
-    // Unfortunately, anything related to weak linking on MacOS
-    // only seems to be working with dynamic libraries.
-    // So we stick to "-alias _main _konan_main" on Mac.
-    // And just do the same on Linux.
-    private val entryPointSelector: List<String>
-        get() = if (nomain || linkerOutput != LinkerOutputKind.EXECUTABLE) emptyList() else platform.entrySelector
 
     fun link(objectFiles: List<ObjectFile>) {
         val nativeDependencies = context.llvm.nativeDependenciesToLink
@@ -77,7 +68,9 @@ internal class Linker(val context: Context) {
             val framework = File(context.config.outputFile)
             val dylibName = framework.name.removeSuffix(".framework")
             val dylibRelativePath = when (target.family) {
-                Family.IOS -> dylibName
+                Family.IOS,
+                Family.TVOS,
+                Family.WATCHOS -> dylibName
                 Family.OSX -> "Versions/A/$dylibName"
                 else -> error(target)
             }
@@ -87,16 +80,22 @@ internal class Linker(val context: Context) {
             executable = dylibPath.absolutePath
         }
 
+        val needsProfileLibrary = context.coverage.enabled
+
+        val caches = determineCachesToLink(context)
+
         try {
             File(executable).delete()
             linker.linkCommands(objectFiles = objectFiles, executable = executable,
-                    libraries = linker.linkStaticLibraries(includedBinaries) + context.config.defaultSystemLibraries,
-                    linkerArgs = entryPointSelector +
-                            asLinkerArgs(config.getNotNull(KonanConfigKeys.LINKER_ARGS)) +
+                    libraries = linker.linkStaticLibraries(includedBinaries) + context.config.defaultSystemLibraries +
+                            caches.static.takeIf { context.config.produce != CompilerOutputKind.STATIC_CACHE }.orEmpty(),
+                    linkerArgs = asLinkerArgs(config.getNotNull(KonanConfigKeys.LINKER_ARGS)) +
                             BitcodeEmbedding.getLinkerOptions(context.config) +
+                            caches.dynamic +
                             libraryProvidedLinkerFlags + frameworkLinkerArgs,
                     optimize = optimize, debug = debug, kind = linkerOutput,
-                    outputDsymBundle = context.config.outputFile + ".dSYM").forEach {
+                    outputDsymBundle = context.config.outputFile + ".dSYM",
+                    needsProfileLibrary = needsProfileLibrary).forEach {
                 it.logWith(context::log)
                 it.execute()
             }
@@ -106,4 +105,36 @@ internal class Linker(val context: Context) {
         return executable
     }
 
+}
+
+private class CachesToLink(val static: List<String>, val dynamic: List<String>)
+
+private fun determineCachesToLink(context: Context): CachesToLink {
+    val staticCaches = mutableListOf<String>()
+    val dynamicCaches = mutableListOf<String>()
+
+    // TODO: suboptimal, see e.g. [LlvmImports].
+    context.librariesWithDependencies.forEach { library ->
+        val currentBinaryContainsLibrary = context.llvmModuleSpecification.containsLibrary(library)
+        val cache = context.config.cachedLibraries.getLibraryCache(library)
+        val libraryIsCached = cache != null
+
+        // Consistency check. Generally guaranteed by implementation.
+        if (currentBinaryContainsLibrary && libraryIsCached) {
+            error("Library ${library.libraryName} is found in both cache and current binary")
+        } else if (!currentBinaryContainsLibrary && !libraryIsCached) {
+            error("Library ${library.libraryName} is not found neither in cache nor in current binary")
+        }
+
+        if (cache != null) {
+            val list = when (cache.kind) {
+                CachedLibraries.Cache.Kind.DYNAMIC -> dynamicCaches
+                CachedLibraries.Cache.Kind.STATIC -> staticCaches
+            }
+
+            list += cache.path
+        }
+    }
+
+    return CachesToLink(static = staticCaches.distinct(), dynamic = dynamicCaches.distinct())
 }

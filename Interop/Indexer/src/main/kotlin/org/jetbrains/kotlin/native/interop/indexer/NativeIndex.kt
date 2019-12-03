@@ -264,11 +264,14 @@ open class BoolType: PrimitiveType
 object CBoolType : BoolType()
 
 object ObjCBoolType : BoolType()
-
+// We omit `const` qualifier for IntegerType and FloatingType to make `CBridgeGen` simpler.
+// See KT-28102.
 data class IntegerType(val size: Int, val isSigned: Boolean, val spelling: String) : PrimitiveType
 
 // TODO: floating type is not actually defined entirely by its size.
 data class FloatingType(val size: Int, val spelling: String) : PrimitiveType
+
+data class VectorType(val elementType: Type, val elementCount: Int, val spelling: String) : PrimitiveType
 
 object VoidType : Type
 

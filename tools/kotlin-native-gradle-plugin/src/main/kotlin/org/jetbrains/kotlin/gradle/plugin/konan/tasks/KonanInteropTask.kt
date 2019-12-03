@@ -28,7 +28,7 @@ import org.jetbrains.kotlin.gradle.plugin.konan.KonanInteropSpec.IncludeDirector
 import org.jetbrains.kotlin.gradle.plugin.model.KonanModelArtifact
 import org.jetbrains.kotlin.gradle.plugin.model.KonanModelArtifactImpl
 import org.jetbrains.kotlin.konan.CURRENT
-import org.jetbrains.kotlin.konan.KonanVersion
+import org.jetbrains.kotlin.konan.CompilerVersion
 import org.jetbrains.kotlin.konan.library.defaultResolver
 import org.jetbrains.kotlin.konan.target.CompilerOutputKind
 import org.jetbrains.kotlin.konan.target.Distribution
@@ -75,7 +75,7 @@ open class KonanInteropTask @Inject constructor(val workerExecutor: WorkerExecut
     @InputFiles val headers   = mutableSetOf<FileCollection>()
     @InputFiles val linkFiles = mutableSetOf<FileCollection>()
 
-    override fun buildArgs() = mutableListOf<String>().apply {
+    fun buildArgs() = mutableListOf<String>().apply {
         addArg("-o", artifact.canonicalPath)
 
         addArgIfNotNull("-target", konanTarget.visibleName)
@@ -105,7 +105,8 @@ open class KonanInteropTask @Inject constructor(val workerExecutor: WorkerExecut
         addArgs("-library", libraries.namedKlibs)
         addArgs("-library", libraries.artifacts.map { it.artifact.canonicalPath })
 
-        addKey("-nodefaultlibs", noDefaultLibs)
+        addKey("-no-default-libs", noDefaultLibs)
+        addKey("-no-endorsed-libs", noEndorsedLibs)
 
         addAll(extraOpts)
     }

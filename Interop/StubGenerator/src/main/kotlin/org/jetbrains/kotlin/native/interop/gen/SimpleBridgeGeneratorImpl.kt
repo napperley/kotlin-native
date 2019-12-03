@@ -21,6 +21,8 @@ import org.jetbrains.kotlin.native.interop.indexer.CompilationWithPCH
 import org.jetbrains.kotlin.native.interop.indexer.Language
 import org.jetbrains.kotlin.native.interop.indexer.mapFragmentIsCompilable
 
+internal val INVALID_CLANG_IDENTIFIER_REGEX = "[^a-zA-Z1-9_]".toRegex()
+
 class SimpleBridgeGeneratorImpl(
         private val platform: KotlinPlatform,
         private val pkgName: String,
@@ -44,6 +46,7 @@ class SimpleBridgeGeneratorImpl(
             BridgedType.ULONG -> "jlong"
             BridgedType.FLOAT -> "jfloat"
             BridgedType.DOUBLE -> "jdouble"
+            BridgedType.VECTOR128 -> TODO()
             BridgedType.NATIVE_PTR -> "jlong"
             BridgedType.OBJC_POINTER -> TODO()
             BridgedType.VOID -> "void"
@@ -59,6 +62,7 @@ class SimpleBridgeGeneratorImpl(
             BridgedType.ULONG -> "uint64_t"
             BridgedType.FLOAT -> "float"
             BridgedType.DOUBLE -> "double"
+            BridgedType.VECTOR128 -> TODO() // "float __attribute__ ((__vector_size__ (16)))"
             BridgedType.NATIVE_PTR -> "void*"
             BridgedType.OBJC_POINTER -> "id"
             BridgedType.VOID -> "void"
@@ -245,9 +249,5 @@ class SimpleBridgeGeneratorImpl(
             override fun isSupported(nativeBacked: NativeBacked): Boolean =
                     nativeBacked !in excludedClients
         }
-    }
-
-    companion object {
-        private val INVALID_CLANG_IDENTIFIER_REGEX = "[^a-zA-Z1-9_]".toRegex()
     }
 }

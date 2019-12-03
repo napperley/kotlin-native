@@ -9,6 +9,11 @@ void errorHandler(const char* str) {
   printf("Error handler: %s\n", str);
 }
 
+void testVector128() {
+    int __attribute__ ((__vector_size__ (16))) v4f = __ kotlin.root.getVector128();
+    printf("getVector128 = (%d, %d, %d, %d)\n",  v4f[0],  v4f[1],  v4f[2],  v4f[3]);
+}
+
 int main(void) {
     T_(Singleton) singleton = __ kotlin.root.Singleton._instance();
     T_(Base) base = __ kotlin.root.Base.Base();
@@ -25,6 +30,7 @@ int main(void) {
     T_(kotlin_Unit) nullableUnit = __ createNullableUnit();
     T_(kotlin_Int) nullableIntNull = { .pinned = 0 };
     T_(kotlin_Unit) nullableUnitNull = { .pinned = 0 };
+    T_(EnumWithInterface) enum2 = __ kotlin.root.EnumWithInterface.ZERO.get();
 
     const char* string1 = __ kotlin.root.getString();
     const char* string2 = __ kotlin.root.Singleton.toString(singleton);
@@ -48,6 +54,7 @@ int main(void) {
     printf("RW property is %d\n", __ kotlin.root.Child.get_rwProperty(child));
 
     printf("enum100 = %d\n",  __ kotlin.root.Enum.get_code(enum1));
+    printf("enum42 = %d\n",  __ kotlin.root.EnumWithInterface.foo(enum2));
 
     printf("object = %d\n",  __ kotlin.root.Codeable.asCode(object1));
 
@@ -63,6 +70,8 @@ int main(void) {
 
     __ kotlin.root.testNullableWithNulls(nullableIntNull, nullableUnitNull);
 
+    testVector128();
+
     __ DisposeStablePointer(singleton.pinned);
     __ DisposeString(string1);
     __ DisposeString(string2);
@@ -76,6 +85,7 @@ int main(void) {
     __ DisposeStablePointer(enum1.pinned);
     __ DisposeStablePointer(object1.pinned);
     __ DisposeStablePointer(nullableInt.pinned);
+    __ DisposeStablePointer(enum2.pinned);
 
     __ kotlin.root.setCErrorHandler(&errorHandler);
     __ kotlin.root.throwException();

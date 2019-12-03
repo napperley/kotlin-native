@@ -4,25 +4,47 @@
  */
 package org.jetbrains.kotlin.backend.konan
 
-import llvm.LLVMLinkModules2
-import llvm.LLVMModuleRef
-import llvm.LLVMWriteBitcodeToFile
-import org.jetbrains.kotlin.backend.konan.library.impl.buildLibrary
+import llvm.*
+import org.jetbrains.kotlin.backend.common.serialization.KlibIrVersion
+import org.jetbrains.kotlin.backend.common.serialization.metadata.KlibMetadataVersion
 import org.jetbrains.kotlin.backend.konan.llvm.*
 import org.jetbrains.kotlin.backend.konan.llvm.Llvm
+import org.jetbrains.kotlin.backend.konan.llvm.objc.linkObjC
 import org.jetbrains.kotlin.konan.CURRENT
 import org.jetbrains.kotlin.library.KotlinAbiVersion
-import org.jetbrains.kotlin.konan.KonanVersion
+import org.jetbrains.kotlin.konan.CompilerVersion
 import org.jetbrains.kotlin.konan.file.isBitcode
 import org.jetbrains.kotlin.library.*
 import org.jetbrains.kotlin.konan.target.CompilerOutputKind
 import org.jetbrains.kotlin.konan.target.Family
+import org.jetbrains.kotlin.konan.library.impl.buildLibrary
 
-val CompilerOutputKind.isNativeBinary: Boolean get() = when (this) {
+/**
+ * Supposed to be true for a single LLVM module within final binary.
+ */
+val CompilerOutputKind.isFinalBinary: Boolean get() = when (this) {
     CompilerOutputKind.PROGRAM, CompilerOutputKind.DYNAMIC,
     CompilerOutputKind.STATIC, CompilerOutputKind.FRAMEWORK -> true
+    CompilerOutputKind.DYNAMIC_CACHE, CompilerOutputKind.STATIC_CACHE,
     CompilerOutputKind.LIBRARY, CompilerOutputKind.BITCODE -> false
 }
+
+val CompilerOutputKind.involvesBitcodeGeneration: Boolean
+    get() = this != CompilerOutputKind.LIBRARY
+
+internal val Context.producedLlvmModuleContainsStdlib: Boolean
+    get() = this.llvmModuleSpecification.containsModule(this.stdlibModule)
+
+val CompilerOutputKind.involvesLinkStage: Boolean
+    get() = when (this) {
+        CompilerOutputKind.PROGRAM, CompilerOutputKind.DYNAMIC,
+        CompilerOutputKind.DYNAMIC_CACHE, CompilerOutputKind.STATIC_CACHE,
+        CompilerOutputKind.STATIC, CompilerOutputKind.FRAMEWORK -> true
+        CompilerOutputKind.LIBRARY, CompilerOutputKind.BITCODE -> false
+    }
+
+val CompilerOutputKind.isCache: Boolean
+    get() = (this == CompilerOutputKind.STATIC_CACHE || this == CompilerOutputKind.DYNAMIC_CACHE)
 
 internal fun produceCStubs(context: Context) {
     val llvmModule = context.llvmModule!!
@@ -31,9 +53,19 @@ internal fun produceCStubs(context: Context) {
     }
 }
 
-private fun linkAllDependecies(context: Context, generatedBitcodeFiles: List<String>) {
+private fun linkAllDependencies(context: Context, generatedBitcodeFiles: List<String>) {
+    val config = context.config
 
-    val nativeLibraries = context.config.nativeLibraries + context.config.defaultNativeLibraries
+    val runtimeNativeLibraries = config.runtimeNativeLibraries
+            .takeIf { context.producedLlvmModuleContainsStdlib }.orEmpty()
+
+    val launcherNativeLibraries = config.launcherNativeLibraries
+            .takeIf { config.produce == CompilerOutputKind.PROGRAM }.orEmpty()
+
+    linkObjC(context)
+
+    val nativeLibraries = config.nativeLibraries + runtimeNativeLibraries + launcherNativeLibraries
+
     val bitcodeLibraries = context.llvm.bitcodeToLink.map { it.bitcodePaths }.flatten().filter { it.isBitcode }
     val additionalBitcodeFilesToLink = context.llvm.additionalProducedBitcodeFiles
     val bitcodeFiles = (nativeLibraries + generatedBitcodeFiles + additionalBitcodeFilesToLink + bitcodeLibraries).toSet()
@@ -44,17 +76,14 @@ private fun linkAllDependecies(context: Context, generatedBitcodeFiles: List<Str
     }
 }
 
-private fun shouldOptimizeWithLlvmApi(context: Context) =
-        (context.config.target.family != Family.ZEPHYR && context.config.target.family != Family.WASM)
-
-private fun shoudRunClosedWorldCleanUp(context: Context) =
-        // GlobalDCE will kill coverage-related globals.
-        !context.coverage.enabled
-
-private fun runLlvmPipeline(context: Context) = when {
-    shouldOptimizeWithLlvmApi(context) -> runLlvmOptimizationPipeline(context)
-    shoudRunClosedWorldCleanUp(context) -> runClosedWorldCleanup(context)
-    else -> {}
+private fun insertAliasToEntryPoint(context: Context) {
+    val nomain = context.config.configuration.get(KonanConfigKeys.NOMAIN) ?: false
+    if (context.config.produce != CompilerOutputKind.PROGRAM || nomain)
+        return
+    val module = context.llvmModule
+    val entryPoint = LLVMGetNamedFunction(module, "Konan_main")
+            ?: error("Module doesn't contain `Konan_main`")
+    LLVMAddAlias(module, LLVMTypeOf(entryPoint)!!, entryPoint, "main")
 }
 
 internal fun produceOutput(context: Context) {
@@ -67,6 +96,8 @@ internal fun produceOutput(context: Context) {
         CompilerOutputKind.STATIC,
         CompilerOutputKind.DYNAMIC,
         CompilerOutputKind.FRAMEWORK,
+        CompilerOutputKind.DYNAMIC_CACHE,
+        CompilerOutputKind.STATIC_CACHE,
         CompilerOutputKind.PROGRAM -> {
             val output = tempFiles.nativeBinaryFileName
             context.bitcodeFileName = output
@@ -81,8 +112,11 @@ internal fun produceOutput(context: Context) {
             if (produce == CompilerOutputKind.FRAMEWORK && context.config.produceStaticFramework) {
                 embedAppleLinkerOptionsToBitcode(context.llvm, context.config)
             }
-            linkAllDependecies(context, generatedBitcodeFiles)
-            runLlvmPipeline(context)
+            linkAllDependencies(context, generatedBitcodeFiles)
+            runLlvmOptimizationPipeline(context)
+            // Insert `_main` after pipeline so we won't worry about optimizations
+            // corrupting entry point.
+            insertAliasToEntryPoint(context)
             LLVMWriteBitcodeToFile(context.llvmModule!!, output)
         }
         CompilerOutputKind.LIBRARY -> {
@@ -90,31 +124,34 @@ internal fun produceOutput(context: Context) {
             val libraryName = context.config.moduleId
             val neededLibraries = context.librariesWithDependencies
             val abiVersion = KotlinAbiVersion.CURRENT
-            val compilerVersion = KonanVersion.CURRENT
+            val compilerVersion = CompilerVersion.CURRENT.toString()
             val libraryVersion = config.get(KonanConfigKeys.LIBRARY_VERSION)
-            val versions = KonanLibraryVersioning(
+            val metadataVersion = KlibMetadataVersion.INSTANCE.toString()
+            val irVersion = KlibIrVersion.INSTANCE.toString()
+            val versions = KotlinLibraryVersioning(
                 abiVersion = abiVersion,
                 libraryVersion = libraryVersion,
-                compilerVersion = compilerVersion
+                compilerVersion = compilerVersion,
+                metadataVersion = metadataVersion,
+                irVersion = irVersion
             )
             val target = context.config.target
             val nopack = config.getBoolean(KonanConfigKeys.NOPACK)
             val manifestProperties = context.config.manifestProperties
 
             val library = buildLibrary(
-                context.config.nativeLibraries,
-                context.config.includeBinaries,
-                neededLibraries,
-                context.serializedMetadata!!,
-                context.serializedIr!!,
-                versions,
-                target,
-                output,
-                libraryName,
-                null,
-                nopack,
-                manifestProperties,
-                context.dataFlowGraph)
+                    context.config.nativeLibraries,
+                    context.config.includeBinaries,
+                    neededLibraries,
+                    context.serializedMetadata!!,
+                    context.serializedIr!!,
+                    versions,
+                    target,
+                    output,
+                    libraryName,
+                    nopack,
+                    manifestProperties,
+                    context.dataFlowGraph)
 
             context.bitcodeFileName = library.mainBitcodeFileName
         }

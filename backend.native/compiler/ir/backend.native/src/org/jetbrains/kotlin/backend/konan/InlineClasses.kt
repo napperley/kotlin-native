@@ -6,6 +6,7 @@
 package org.jetbrains.kotlin.backend.konan
 
 import org.jetbrains.kotlin.backend.konan.ir.containsNull
+import org.jetbrains.kotlin.backend.konan.ir.getSuperClassNotAny
 import org.jetbrains.kotlin.builtins.PrimitiveType
 import org.jetbrains.kotlin.descriptors.ClassDescriptor
 import org.jetbrains.kotlin.ir.declarations.IrClass
@@ -18,6 +19,7 @@ import org.jetbrains.kotlin.ir.types.makeNullable
 import org.jetbrains.kotlin.ir.util.constructors
 import org.jetbrains.kotlin.ir.util.defaultType
 import org.jetbrains.kotlin.name.ClassId
+import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.name.FqNameUnsafe
 import org.jetbrains.kotlin.resolve.descriptorUtil.fqNameUnsafe
 import org.jetbrains.kotlin.resolve.descriptorUtil.getAllSuperClassifiers
@@ -80,7 +82,8 @@ enum class KonanPrimitiveType(val classId: ClassId, val binaryType: BinaryType.P
     LONG(PrimitiveType.LONG, PrimitiveBinaryType.LONG),
     FLOAT(PrimitiveType.FLOAT, PrimitiveBinaryType.FLOAT),
     DOUBLE(PrimitiveType.DOUBLE, PrimitiveBinaryType.DOUBLE),
-    NON_NULL_NATIVE_PTR(ClassId.topLevel(KonanFqNames.nonNullNativePtr.toSafe()), PrimitiveBinaryType.POINTER)
+    NON_NULL_NATIVE_PTR(ClassId.topLevel(KonanFqNames.nonNullNativePtr.toSafe()), PrimitiveBinaryType.POINTER),
+    VECTOR128(ClassId.topLevel(KonanFqNames.Vector128), PrimitiveBinaryType.VECTOR128)
 
     ;
 
@@ -211,11 +214,6 @@ private val implicitInlineClasses =
                 KonanFqNames.nativePtr +
                 InteropFqNames.cPointer).toSet()
 
-private val superQualifierTable = mutableMapOf<IrClass, List<IrClass>>()
-private fun IrClass.getAllSuperClassifiers(): List<IrClass> = superQualifierTable.getOrPut(this) {
-    listOf(this) + this.superTypes.flatMap { (it.classifierOrFail.owner as IrClass).getAllSuperClassifiers() }
-}
-
 internal object KotlinTypeInlineClassesSupport : InlineClassesSupport<ClassDescriptor, KotlinType>() {
 
     override fun isNullable(type: KotlinType): Boolean = type.isNullable()
@@ -272,8 +270,12 @@ private object IrTypeInlineClassesSupport : InlineClassesSupport<IrClass, IrType
     override fun getFqName(clazz: IrClass): FqNameUnsafe = clazz.descriptor.fqNameUnsafe
     override fun hasInlineModifier(clazz: IrClass): Boolean = clazz.descriptor.isInline
 
-    override fun getNativePointedSuperclass(clazz: IrClass): IrClass? = clazz.getAllSuperClassifiers()
-            .firstOrNull { it.descriptor.fqNameUnsafe == InteropFqNames.nativePointed }
+    override fun getNativePointedSuperclass(clazz: IrClass): IrClass? {
+        var superClass: IrClass? = clazz
+        while (superClass != null && superClass.descriptor.fqNameUnsafe != InteropFqNames.nativePointed)
+            superClass = superClass.getSuperClassNotAny()
+        return superClass
+    }
 
     override fun getInlinedClassUnderlyingType(clazz: IrClass): IrType =
             clazz.constructors.firstOrNull { it.isPrimary }?.valueParameters?.single()?.type

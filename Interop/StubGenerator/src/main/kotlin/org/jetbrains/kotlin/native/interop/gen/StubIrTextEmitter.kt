@@ -29,18 +29,8 @@ class StubIrTextEmitter(
     private val pkgName: String
         get() = context.configuration.pkgName
 
-    private val jvmFileClassName = if (pkgName.isEmpty()) {
-        context.libName
-    } else {
-        pkgName.substringAfterLast('.')
-    }
-
     private val StubContainer.isTopLevelContainer: Boolean
         get() = this == builderResult.stubs
-
-    companion object {
-        private val VALID_PACKAGE_NAME_REGEX = "[a-zA-Z0-9_.]+".toRegex()
-    }
 
     /**
      * The output currently used by the generator.
@@ -97,7 +87,7 @@ class StubIrTextEmitter(
 
     private fun emitKotlinFileHeader() {
         if (context.platform == KotlinPlatform.JVM) {
-            out("@file:JvmName(${jvmFileClassName.quoteAsKotlinLiteral()})")
+            out("@file:JvmName(${context.jvmFileClassName.quoteAsKotlinLiteral()})")
         }
         if (context.platform == KotlinPlatform.NATIVE) {
             out("@file:kotlinx.cinterop.InteropStubs")
@@ -124,14 +114,7 @@ class StubIrTextEmitter(
 
         out("@file:Suppress(${suppress.joinToString { it.quoteAsKotlinLiteral() }})")
         if (pkgName != "") {
-            val packageName = pkgName.split(".").joinToString("."){
-                if(it.matches(VALID_PACKAGE_NAME_REGEX)){
-                    it
-                }else{
-                    "`$it`"
-                }
-            }
-            out("package $packageName")
+            out("package ${context.validPackageName}")
             out("")
         }
         if (context.platform == KotlinPlatform.NATIVE) {
@@ -148,28 +131,7 @@ class StubIrTextEmitter(
 
         out("// NOTE THIS FILE IS AUTO-GENERATED")
     }
-    fun emit(ktFile: Appendable, cFile: Appendable, entryPoint: String?) {
-
-        withOutput(cFile) {
-            context.libraryForCStubs.preambleLines.forEach {
-                out(it)
-            }
-            out("")
-
-            out("// NOTE THIS FILE IS AUTO-GENERATED")
-            out("")
-
-            nativeBridges.nativeLines.forEach(out)
-
-            if (entryPoint != null) {
-                out("extern int Konan_main(int argc, char** argv);")
-                out("")
-                out("__attribute__((__used__))")
-                out("int $entryPoint(int argc, char** argv)  {")
-                out("  return Konan_main(argc, argv);")
-                out("}")
-            }
-        }
+    fun emit(ktFile: Appendable) {
 
         // Stubs generation may affect imports list so do it before header generation.
         val stubLines = generateKotlinFragmentBy {
@@ -180,9 +142,8 @@ class StubIrTextEmitter(
             emitKotlinFileHeader()
             stubLines.forEach(out)
             nativeBridges.kotlinLines.forEach(out)
-            if (context.platform == KotlinPlatform.JVM) {
-                out("private val loadLibrary = System.loadLibrary(\"${context.libName}\")")
-            }
+            if (context.platform == KotlinPlatform.JVM)
+                out("private val loadLibrary = loadKonanLibrary(\"${context.libName}\")")
         }
     }
     private val printer = object : StubIrVisitor<StubContainer?, Unit> {
@@ -209,7 +170,7 @@ class StubIrTextEmitter(
         }
 
         override fun visitTypealias(element: TypealiasStub, owner: StubContainer?) {
-            val alias = renderClassifierDeclaration(element.alias.classifier) + renderTypeArguments(element.alias.typeArguments)
+            val alias = renderClassifierDeclaration(element.alias)
             val aliasee = renderStubType(element.aliasee)
             out("typealias $alias = $aliasee")
         }
@@ -217,30 +178,31 @@ class StubIrTextEmitter(
         override fun visitFunction(element: FunctionStub, owner: StubContainer?) {
             if (element in bridgeBuilderResult.excludedStubs) return
 
-            val modality = renderMemberModality(element.modality, owner)
+            val header = run {
+                val parameters = element.parameters.joinToString(prefix = "(", postfix = ")") { renderFunctionParameter(it) }
+                val receiver = element.receiver?.let { renderFunctionReceiver(it) + "." } ?: ""
+                val typeParameters = renderTypeParameters(element.typeParameters)
+                val modality = renderMemberModality(element.modality, owner)
+                "${modality}fun$typeParameters $receiver${element.name.asSimpleName()}$parameters: ${renderStubType(element.returnType)}"
+            }
+            if (!nativeBridges.isSupported(element)) {
+                sequenceOf(
+                        annotationForUnableToImport,
+                        "$header = throw UnsupportedOperationException()"
+                ).forEach(out)
+                return
+            }
             element.annotations.forEach {
                 out(renderAnnotation(it))
             }
-            val parameters = element.parameters.joinToString(prefix = "(", postfix = ")") { renderFunctionParameter(it) }
-            val receiver = element.receiver?.let { renderFunctionReceiver(it) + "." } ?: ""
-            val typeParameters = renderTypeParameters(element.typeParameters)
-            val header = "${modality}fun$typeParameters $receiver${element.name.asSimpleName()}$parameters: ${renderStubType(element.returnType)}"
             when {
                 element.external -> out("external $header")
                 element.isOptionalObjCMethod() -> out("$header = optional()")
                 owner != null && owner.isInterface -> out(header)
-                else -> if (nativeBridges.isSupported(element)) {
-                    block(header) {
-                        functionBridgeBodies.getValue(element).forEach(out)
-                    }
-                } else {
-                    sequenceOf(
-                            annotationForUnableToImport,
-                            "$header = throw UnsupportedOperationException()"
-                    ).forEach(out)
+                else -> block(header) {
+                    functionBridgeBodies.getValue(element).forEach(out)
                 }
             }
-
         }
 
         override fun visitProperty(element: PropertyStub, owner: StubContainer?) {
@@ -399,6 +361,7 @@ class StubIrTextEmitter(
                     MemberStubModality.OVERRIDE -> "override "
                     MemberStubModality.OPEN -> "open "
                     MemberStubModality.FINAL -> "final "
+                    MemberStubModality.ABSTRACT -> "abstract "
                 }
 
     private fun renderVisibilityModifier(visibilityModifier: VisibilityModifier) = when (visibilityModifier) {
@@ -463,15 +426,32 @@ class StubIrTextEmitter(
         return "${renderStubType(superClassInit.type)}$parameters"
     }
 
-    private fun renderStubType(stubType: StubType): String = when (stubType) {
-        is WrapperStubType -> stubType.kotlinType.render(kotlinFile)
-        is ClassifierStubType -> {
-            val classifier = kotlinFile.reference(stubType.classifier)
-            val typeArguments = renderTypeArguments(stubType.typeArguments)
-            val nullability = if (stubType.nullable) "?" else ""
-            "$classifier$typeArguments$nullability"
+    private fun renderStubType(stubType: StubType): String {
+        val nullable = if (stubType.nullable) "?" else ""
+
+        return when (stubType) {
+            is ClassifierStubType -> {
+                val classifier = kotlinFile.reference(stubType.classifier)
+                val typeArguments = renderTypeArguments(stubType.typeArguments)
+                "$classifier$typeArguments$nullable"
+            }
+            is FunctionalType -> buildString {
+                if (stubType.nullable) append("(")
+
+                append('(')
+                stubType.parameterTypes.joinTo(this) { renderStubType(it) }
+                append(") -> ")
+                append(renderStubType(stubType.returnType))
+
+                if (stubType.nullable) append(")?")
+            }
+            is TypeParameterType -> "${stubType.name}$nullable"
+            is AbbreviatedType -> {
+                val classifier = kotlinFile.reference(stubType.abbreviatedClassifier)
+                val typeArguments = renderTypeArguments(stubType.typeArguments)
+                "$classifier$typeArguments$nullable"
+            }
         }
-        is SymbolicStubType -> stubType.name + if (stubType.nullable) "?" else ""
     }
 
     private fun renderValueUsage(value: ValueStub): String = when (value) {
@@ -646,10 +626,23 @@ class StubIrTextEmitter(
         }
     }
 
-    private fun renderTypeArguments(typeArguments: List<TypeArgumentStub>) = if (typeArguments.isNotEmpty()) {
-        typeArguments.joinToString(", ", "<", ">") { renderStubType(it.type) }
+    private fun renderTypeArguments(typeArguments: List<TypeArgument>) = if (typeArguments.isNotEmpty()) {
+        typeArguments.joinToString(", ", "<", ">") { renderTypeArgument(it) }
     } else {
         ""
+    }
+
+    private fun renderTypeArgument(typeArgument: TypeArgument) = when (typeArgument) {
+        is TypeArgumentStub -> {
+            val variance = when (typeArgument.variance) {
+                TypeArgument.Variance.INVARIANT -> ""
+                TypeArgument.Variance.IN -> "in "
+                TypeArgument.Variance.OUT -> "out "
+            }
+            "$variance${renderStubType(typeArgument.type)}"
+        }
+        TypeArgument.StarProjection -> "*"
+        else -> error("Unexpected type argument: $typeArgument")
     }
 
     private fun renderTypeParameters(typeParameters: List<TypeParameterStub>) = if (typeParameters.isNotEmpty()) {

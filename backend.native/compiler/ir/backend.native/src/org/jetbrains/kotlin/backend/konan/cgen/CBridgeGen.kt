@@ -1,19 +1,17 @@
 package org.jetbrains.kotlin.backend.konan.cgen
 
-import org.jetbrains.kotlin.backend.common.descriptors.WrappedClassConstructorDescriptor
-import org.jetbrains.kotlin.backend.common.descriptors.WrappedClassDescriptor
-import org.jetbrains.kotlin.backend.common.descriptors.WrappedSimpleFunctionDescriptor
-import org.jetbrains.kotlin.backend.common.descriptors.WrappedValueParameterDescriptor
 import org.jetbrains.kotlin.backend.common.ir.addFakeOverrides
 import org.jetbrains.kotlin.backend.common.ir.createDispatchReceiverParameter
 import org.jetbrains.kotlin.backend.common.ir.createParameterDeclarations
 import org.jetbrains.kotlin.backend.common.ir.simpleFunctions
 import org.jetbrains.kotlin.backend.common.lower.at
 import org.jetbrains.kotlin.backend.common.lower.irNot
+import org.jetbrains.kotlin.backend.konan.KonanFqNames
 import org.jetbrains.kotlin.backend.konan.PrimitiveBinaryType
 import org.jetbrains.kotlin.backend.konan.RuntimeNames
 import org.jetbrains.kotlin.backend.konan.ir.*
 import org.jetbrains.kotlin.backend.konan.isObjCMetaClass
+import org.jetbrains.kotlin.builtins.KotlinBuiltIns
 import org.jetbrains.kotlin.builtins.UnsignedType
 import org.jetbrains.kotlin.descriptors.ClassKind
 import org.jetbrains.kotlin.descriptors.Modality
@@ -27,7 +25,6 @@ import org.jetbrains.kotlin.ir.declarations.impl.IrClassImpl
 import org.jetbrains.kotlin.ir.declarations.impl.IrConstructorImpl
 import org.jetbrains.kotlin.ir.declarations.impl.IrFunctionImpl
 import org.jetbrains.kotlin.ir.declarations.impl.IrValueParameterImpl
-import org.jetbrains.kotlin.ir.descriptors.IrBuiltIns
 import org.jetbrains.kotlin.ir.expressions.*
 import org.jetbrains.kotlin.ir.expressions.impl.IrConstImpl
 import org.jetbrains.kotlin.ir.expressions.impl.IrFunctionReferenceImpl
@@ -44,6 +41,8 @@ import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.name.Name
 import org.jetbrains.kotlin.types.Variance
 import org.jetbrains.kotlin.util.OperatorNameConventions
+import org.jetbrains.kotlin.backend.konan.getObjCMethodInfo
+import org.jetbrains.kotlin.ir.descriptors.*
 
 internal interface KotlinStubs {
     val irBuiltIns: IrBuiltIns
@@ -536,7 +535,6 @@ internal fun KotlinStubs.generateCFunctionPointer(
             expression.endOffset,
             expression.type,
             fakeFunction.symbol,
-            fakeFunction.descriptor,
             0
     )
 }
@@ -569,7 +567,10 @@ private fun KotlinStubs.createFakeKotlinExternalFunction(
             isInline = false,
             isExternal = true,
             isTailrec = false,
-            isSuspend = false
+            isSuspend = false,
+            isExpect = false,
+            isFakeOverride = false,
+            isOperator = false
     )
     bridgeDescriptor.bind(bridge)
 
@@ -634,8 +635,9 @@ private fun KotlinStubs.getNamedCStructType(kotlinClass: IrClass): CType? {
 }
 
 // TODO: rework Boolean support.
+// TODO: What should be used on watchOS?
 private fun cBoolType(target: KonanTarget): CType? = when (target.family) {
-    Family.IOS -> CTypes.C99Bool
+    Family.IOS, Family.TVOS, Family.WATCHOS -> CTypes.C99Bool
     else -> CTypes.signedChar
 }
 
@@ -750,6 +752,16 @@ private fun KotlinStubs.mapBlockType(
 private fun KotlinStubs.mapType(type: IrType, retained: Boolean, variadic: Boolean, location: TypeLocation): ValuePassing =
         mapType(type, retained, variadic, location, { reportUnsupportedType(it, type, location) })
 
+private fun IrType.isTypeOfNullLiteral(): Boolean = this is IrSimpleType && hasQuestionMark
+        && classifier.isClassWithFqName(KotlinBuiltIns.FQ_NAMES.nothing)
+
+private fun IrType.isVector(): Boolean {
+    if (this is IrSimpleType && !this.hasQuestionMark) {
+        return classifier.isClassWithFqName(KonanFqNames.Vector128.toUnsafe())
+    }
+    return false
+}
+
 private fun KotlinStubs.mapType(
         type: IrType,
         retained: Boolean,
@@ -769,10 +781,13 @@ private fun KotlinStubs.mapType(
     type.isFloat() -> TrivialValuePassing(irBuiltIns.floatType, CTypes.float)
     type.isDouble() -> TrivialValuePassing(irBuiltIns.doubleType, CTypes.double)
     type.classifierOrNull == symbols.interopCPointer -> TrivialValuePassing(type, CTypes.voidPtr)
+    type.isTypeOfNullLiteral() && variadic  -> TrivialValuePassing(symbols.interopCPointer.typeWithStarProjections.makeNullable(), CTypes.voidPtr)
     type.isUByte() -> UnsignedValuePassing(type, CTypes.signedChar, CTypes.unsignedChar)
     type.isUShort() -> UnsignedValuePassing(type, CTypes.short, CTypes.unsignedShort)
     type.isUInt() -> UnsignedValuePassing(type, CTypes.int, CTypes.unsignedInt)
     type.isULong() -> UnsignedValuePassing(type, CTypes.longLong, CTypes.unsignedLongLong)
+
+    type.isVector() -> TrivialValuePassing(type, CTypes.vector128)
 
     type.isCEnumType() -> {
         val enumClass = type.getClass()!!
@@ -809,7 +824,7 @@ private fun KotlinStubs.mapType(
 }
 
 private fun KotlinStubs.isObjCReferenceType(type: IrType): Boolean {
-    if (target.family != Family.OSX && target.family != Family.IOS) return false
+    if (!target.family.isAppleFamily) return false
 
     // Handle the same types as produced by [objCPointerMirror] in Interop/StubGenerator/.../Mappings.kt.
 
@@ -1189,7 +1204,7 @@ private class ObjCBlockPointerValuePassing(
                 OBJC_BLOCK_FUNCTION_IMPL, IrClassSymbolImpl(classDescriptor),
                 Name.identifier(stubs.getUniqueKotlinFunctionReferenceClassName("BlockFunctionImpl")),
                 ClassKind.CLASS, Visibilities.PRIVATE, Modality.FINAL,
-                isCompanion = false, isInner = false, isData = false, isExternal = false, isInline = false
+                isCompanion = false, isInner = false, isData = false, isExternal = false, isInline = false, isExpect = false
         )
         classDescriptor.bind(irClass)
         irClass.createParameterDeclarations()
@@ -1213,7 +1228,7 @@ private class ObjCBlockPointerValuePassing(
                 Name.special("<init>"),
                 Visibilities.PUBLIC,
                 irClass.defaultType,
-                isInline = false, isExternal = false, isPrimary = true
+                isInline = false, isExternal = false, isPrimary = true, isExpect = false
         )
         constructorDescriptor.bind(constructor)
         irClass.addChild(constructor)
@@ -1254,7 +1269,8 @@ private class ObjCBlockPointerValuePassing(
                 overriddenInvokeMethod.name,
                 Visibilities.PUBLIC, Modality.FINAL,
                 returnType = functionType.arguments.last().typeOrNull!!,
-                isInline = false, isExternal = false, isTailrec = false, isSuspend = false
+                isInline = false, isExternal = false, isTailrec = false, isSuspend = false, isExpect = false,
+                isFakeOverride = false, isOperator = false
         )
         invokeMethodDescriptor.bind(invokeMethod)
         invokeMethod.overriddenSymbols += overriddenInvokeMethod.symbol
@@ -1369,8 +1385,10 @@ private class ObjCBlockPointerValuePassing(
 private class WCStringArgumentPassing : KotlinToCArgumentPassing {
 
     override fun KotlinToCCallBuilder.passValue(expression: IrExpression): CExpression {
-        val wcstr = irBuilder.irCall(symbols.interopWcstr.owner).apply {
-            extensionReceiver = expression
+        val wcstr = irBuilder.irSafeTransform(expression) {
+            irCall(symbols.interopWcstr.owner).apply {
+                extensionReceiver = it
+            }
         }
         return with(CValuesRefArgumentPassing) { passValue(wcstr) }
     }
@@ -1380,8 +1398,10 @@ private class WCStringArgumentPassing : KotlinToCArgumentPassing {
 private class CStringArgumentPassing : KotlinToCArgumentPassing {
 
     override fun KotlinToCCallBuilder.passValue(expression: IrExpression): CExpression {
-        val cstr = irBuilder.irCall(symbols.interopCstr.owner).apply {
-            extensionReceiver = expression
+        val cstr = irBuilder.irSafeTransform(expression) {
+            irCall(symbols.interopCstr.owner).apply {
+                extensionReceiver = it
+            }
         }
         return with(CValuesRefArgumentPassing) { passValue(cstr) }
     }
@@ -1404,25 +1424,33 @@ private fun KotlinToCCallBuilder.cValuesRefToPointer(
         value: IrExpression
 ): IrExpression = if (value.type.classifierOrNull == symbols.interopCPointer) {
     value // Optimization
-} else with(irBuilder) {
+} else {
     val getPointerFunction = symbols.interopCValuesRef.owner
             .simpleFunctions()
             .single { it.name.asString() == "getPointer" }
 
-    fun getPointer(expression: IrExpression) = irCall(getPointerFunction).apply {
-        dispatchReceiver = expression
-        putValueArgument(0, bridgeCallBuilder.getMemScope())
+    irBuilder.irSafeTransform(value) {
+        irCall(getPointerFunction).apply {
+            dispatchReceiver = it
+            putValueArgument(0, bridgeCallBuilder.getMemScope())
+        }
     }
+}
 
-    if (!value.type.isNullable()) {
-        getPointer(value) // Optimization
-    } else irLetS(value) { valueVarSymbol ->
+private fun IrBuilderWithScope.irSafeTransform(
+        value: IrExpression,
+        block: IrBuilderWithScope.(IrExpression) -> IrExpression
+): IrExpression = if (!value.type.isNullable()) {
+    block(value) // Optimization
+} else {
+    irLetS(value) { valueVarSymbol ->
         val valueVar = valueVarSymbol.owner
+        val transformed = block(irGet(valueVar))
         irIfThenElse(
-                type = symbols.interopCPointer.typeWithStarProjections.makeNullable(),
+                type = transformed.type.makeNullable(),
                 condition = irEqeqeq(irGet(valueVar), irNull()),
                 thenPart = irNull(),
-                elsePart = getPointer(irGet(valueVar))
+                elsePart = transformed
         )
     }
 }
@@ -1480,6 +1508,6 @@ private fun KotlinStubs.reportUnsupportedType(reason: String, type: IrType, loca
 
     val typeLocation: String = location.render()
 
-    reportError(location.element, "type ${type.toKotlinType()}$typeLocation is not supported here" +
+    reportError(location.element, "type ${type.render()} $typeLocation is not supported here" +
             if (reason.isNotEmpty()) ": $reason" else "")
 }

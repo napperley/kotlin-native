@@ -7,7 +7,6 @@ package org.jetbrains.kotlin.backend.konan.lower
 
 import org.jetbrains.kotlin.backend.common.ClassLoweringPass
 import org.jetbrains.kotlin.backend.common.CommonBackendContext
-import org.jetbrains.kotlin.backend.common.descriptors.WrappedSimpleFunctionDescriptor
 import org.jetbrains.kotlin.backend.common.ir.createDispatchReceiverParameter
 import org.jetbrains.kotlin.backend.common.lower.createIrBuilder
 import org.jetbrains.kotlin.backend.common.lower.irBlockBody
@@ -18,6 +17,7 @@ import org.jetbrains.kotlin.ir.IrStatement
 import org.jetbrains.kotlin.ir.builders.irDelegatingConstructorCall
 import org.jetbrains.kotlin.ir.declarations.*
 import org.jetbrains.kotlin.ir.declarations.impl.IrFunctionImpl
+import org.jetbrains.kotlin.ir.descriptors.WrappedSimpleFunctionDescriptor
 import org.jetbrains.kotlin.ir.expressions.*
 import org.jetbrains.kotlin.ir.expressions.impl.*
 import org.jetbrains.kotlin.ir.symbols.IrSimpleFunctionSymbol
@@ -33,6 +33,7 @@ internal class InitializersLowering(val context: CommonBackendContext) : ClassLo
     object DECLARATION_ORIGIN_ANONYMOUS_INITIALIZER : IrDeclarationOriginImpl("ANONYMOUS_INITIALIZER")
 
     override fun lower(irClass: IrClass) {
+        if (irClass.isInterface) return
         InitializersTransformer(irClass).lowerInitializers()
     }
 
@@ -106,7 +107,10 @@ internal class InitializersLowering(val context: CommonBackendContext) : ClassLo
                         isInline = false,
                         isSuspend = false,
                         isExternal = false,
-                        isTailrec = false
+                        isTailrec = false,
+                        isExpect = false,
+                        isFakeOverride = false,
+                        isOperator = false
                 ).apply {
                     it.bind(this)
                     parent = irClass

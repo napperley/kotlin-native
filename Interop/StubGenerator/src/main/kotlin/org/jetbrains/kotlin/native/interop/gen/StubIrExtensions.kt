@@ -42,8 +42,8 @@ fun StubContainer.computeNamesToBeDeclared(pkgName: String): List<String> {
     }.onEach { checkPackageCorrectness(it) }.map { it.topLevelName }
 
     val typealiasNames = typealiases
-            .onEach { checkPackageCorrectness(it.alias.classifier) }
-            .map { it.alias.classifier.topLevelName }
+            .onEach { checkPackageCorrectness(it.alias) }
+            .map { it.alias.topLevelName }
 
     val namesFromNestedContainers = simpleContainers
             .flatMap { it.computeNamesToBeDeclared(pkgName) }
@@ -55,7 +55,7 @@ val StubContainer.defaultMemberModality: MemberStubModality
     get() = when (this) {
         is SimpleStubContainer -> MemberStubModality.FINAL
         is ClassStub.Simple -> if (this.modality == ClassStubModality.INTERFACE) {
-            MemberStubModality.OPEN
+            MemberStubModality.ABSTRACT
         } else {
             MemberStubModality.FINAL
         }

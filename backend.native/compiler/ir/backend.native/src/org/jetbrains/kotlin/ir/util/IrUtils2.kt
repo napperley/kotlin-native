@@ -6,8 +6,6 @@
 package org.jetbrains.kotlin.ir.util
 
 import org.jetbrains.kotlin.backend.common.CommonBackendContext
-import org.jetbrains.kotlin.backend.common.descriptors.*
-import org.jetbrains.kotlin.backend.common.descriptors.WrappedVariableDescriptor
 import org.jetbrains.kotlin.backend.common.descriptors.substitute
 import org.jetbrains.kotlin.backend.konan.KonanBackendContext
 import org.jetbrains.kotlin.backend.konan.KonanCompilationException
@@ -19,12 +17,16 @@ import org.jetbrains.kotlin.config.LanguageVersionSettings
 import org.jetbrains.kotlin.descriptors.*
 import org.jetbrains.kotlin.descriptors.FunctionDescriptor
 import org.jetbrains.kotlin.descriptors.ParameterDescriptor
+import org.jetbrains.kotlin.descriptors.impl.PackageFragmentDescriptorImpl
 import org.jetbrains.kotlin.ir.IrElement
+import org.jetbrains.kotlin.ir.SourceManager
 import org.jetbrains.kotlin.ir.UNDEFINED_OFFSET
 import org.jetbrains.kotlin.ir.builders.*
 import org.jetbrains.kotlin.ir.declarations.*
 import org.jetbrains.kotlin.ir.declarations.impl.*
 import org.jetbrains.kotlin.ir.descriptors.IrBuiltIns
+import org.jetbrains.kotlin.ir.descriptors.WrappedFieldDescriptor
+import org.jetbrains.kotlin.ir.descriptors.WrappedVariableDescriptor
 import org.jetbrains.kotlin.ir.expressions.*
 import org.jetbrains.kotlin.ir.expressions.impl.*
 import org.jetbrains.kotlin.ir.symbols.IrClassSymbol
@@ -38,8 +40,10 @@ import org.jetbrains.kotlin.ir.types.impl.IrSimpleTypeImpl
 import org.jetbrains.kotlin.ir.types.impl.IrStarProjectionImpl
 import org.jetbrains.kotlin.ir.types.impl.makeTypeProjection
 import org.jetbrains.kotlin.ir.visitors.IrElementVisitor
+import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.name.Name
 import org.jetbrains.kotlin.resolve.calls.checkers.isRestrictsSuspensionReceiver
+import org.jetbrains.kotlin.resolve.scopes.MemberScope
 import org.jetbrains.kotlin.types.*
 import org.jetbrains.kotlin.types.KotlinType
 import org.jetbrains.kotlin.types.typeUtil.immediateSupertypes
@@ -69,7 +73,8 @@ internal fun IrFile.addTopLevelInitializer(expression: IrExpression, context: Ko
             Visibilities.PRIVATE,
             isFinal = true,
             isExternal = false,
-            isStatic = true
+            isStatic = true,
+            isFakeOverride = false
     ).apply {
         descriptor.bind(this)
 
@@ -81,6 +86,15 @@ internal fun IrFile.addTopLevelInitializer(expression: IrExpression, context: Ko
         initializer = IrExpressionBodyImpl(startOffset, endOffset, expression)
     }
     addChild(irField)
+}
+
+fun IrModuleFragment.addFile(fileEntry: SourceManager.FileEntry, packageFqName: FqName): IrFile {
+    val packageFragmentDescriptor = object : PackageFragmentDescriptorImpl(this.descriptor, packageFqName) {
+        override fun getMemberScope(): MemberScope = MemberScope.Empty
+    }
+
+    return IrFileImpl(fileEntry, packageFragmentDescriptor)
+            .also { this.files += it }
 }
 
 inline fun <reified T> stub(name: String): T {
@@ -152,7 +166,7 @@ fun IrBuilderWithScope.irForceNotNull(expression: IrExpression): IrExpression {
         return expression
     }
 
-    return irCall(context.irBuiltIns.checkNotNullSymbol).apply {
+    return irCall(context.irBuiltIns.checkNotNullSymbol, expression.type.makeNotNull()).apply {
         putValueArgument(0, expression)
     }
 }
@@ -240,7 +254,7 @@ fun IrBuilderWithScope.irCall(irFunction: IrFunction, typeArguments: List<IrType
 internal fun irCall(startOffset: Int, endOffset: Int, irFunction: IrFunction, typeArguments: List<IrType>): IrCall =
         IrCallImpl(
                 startOffset, endOffset, irFunction.substitutedReturnType(typeArguments),
-                irFunction.symbol, irFunction.descriptor.substitute(typeArguments), typeArguments.size
+                irFunction.symbol, typeArguments.size
         ).apply {
             typeArguments.forEachIndexed { index, irType ->
                 this.putTypeArgument(index, irType)
@@ -353,6 +367,7 @@ fun createField(
             type,
             Visibilities.PRIVATE,
             !isMutable,
+            false,
             false,
             false
     ).apply {

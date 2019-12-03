@@ -23,7 +23,13 @@ import org.jetbrains.kotlin.native.interop.gen.*
 import org.jetbrains.kotlin.native.interop.gen.wasm.processIdlLib
 import org.jetbrains.kotlin.native.interop.indexer.*
 import org.jetbrains.kotlin.native.interop.tool.*
-import org.jetbrains.kliopt.ArgParser
+import kotlinx.cli.ArgParser
+import org.jetbrains.kotlin.konan.library.*
+import org.jetbrains.kotlin.konan.target.Distribution
+import org.jetbrains.kotlin.konan.target.KonanTarget
+import org.jetbrains.kotlin.library.KotlinLibrary
+import org.jetbrains.kotlin.library.resolver.impl.libraryResolver
+import org.jetbrains.kotlin.library.toUnresolvedLibraries
 import java.io.File
 import java.lang.IllegalArgumentException
 import java.nio.file.*
@@ -33,8 +39,10 @@ fun main(args: Array<String>) {
     processCLib(args)
 }
 
-fun interop(flavor: String, args: Array<String>, additionalArgs: Map<String, Any> = mapOf()) =
-        when(flavor) {
+fun interop(
+        flavor: String, args: Array<String>,
+        additionalArgs: Map<String, Any> = mapOf()
+): Array<String>? = when(flavor) {
             "jvm", "native" -> processCLib(args, additionalArgs)
             "wasm" -> processIdlLib(args, additionalArgs)
             else -> error("Unexpected flavor")
@@ -94,15 +102,14 @@ private fun selectNativeLanguage(config: DefFile.DefFileConfig): Language {
             error("Unexpected language '$language'. Possible values are: ${languages.keys.joinToString { "'$it'" }}")
 }
 
-private fun parseImports(imports: Array<String>): ImportsImpl {
-    val headerIdToPackage = imports.map { arg ->
-        val (pkg, joinedIds) = arg.split(':')
-        val ids = joinedIds.split(';')
-        ids.map { HeaderId(it) to pkg }
-    }.reversed().flatten().toMap()
-
-    return ImportsImpl(headerIdToPackage)
-}
+private fun parseImports(dependencies: List<KotlinLibrary>): ImportsImpl =
+        dependencies.filterIsInstance<KonanLibrary>().mapNotNull { library ->
+            // TODO: handle missing properties?
+            library.packageFqName?.let { packageFqName ->
+                val headerIds = library.includedHeaders
+                headerIds.map { HeaderId(it) to packageFqName }
+            }
+        }.reversed().flatten().toMap().let(::ImportsImpl)
 
 fun getCompilerFlagsForVfsOverlay(headerFilterPrefix: Array<String>, def: DefFile): List<String> {
     val relativeToRoot = mutableMapOf<Path, Path>() // TODO: handle clashes
@@ -157,8 +164,7 @@ private fun findFilesByGlobs(roots: List<Path>, globs: List<String>): Map<Path, 
     return relativeToRoot
 }
 
-
-private fun processCLib(args: Array<String>, additionalArgs: Map<String, Any> = mapOf()): Array<String> {
+private fun processCLib(args: Array<String>, additionalArgs: Map<String, Any> = mapOf()): Array<String>? {
     val cinteropArguments = CInteropArguments()
     cinteropArguments.argParser.parse(args)
     val ktGenRoot = cinteropArguments.generated
@@ -175,16 +181,15 @@ private fun processCLib(args: Array<String>, additionalArgs: Map<String, Any> = 
     val tool = prepareTool(cinteropArguments.target, flavor)
 
     val def = DefFile(defFile, tool.substitutions)
-    val isLinkerOptsSetByUser = (cinteropArguments.argParser.getOrigin("linkerOpts") == ArgParser.ValueOrigin.SET_BY_USER) ||
-            (cinteropArguments.argParser.getOrigin("linker-option") == ArgParser.ValueOrigin.SET_BY_USER) ||
-            (cinteropArguments.argParser.getOrigin("linker-options") == ArgParser.ValueOrigin.SET_BY_USER) ||
-            (cinteropArguments.argParser.getOrigin("lopt") == ArgParser.ValueOrigin.SET_BY_USER)
+    val isLinkerOptsSetByUser = (cinteropArguments.linkerOpts.valueOrigin == ArgParser.ValueOrigin.SET_BY_USER) ||
+            (cinteropArguments.linkerOptions.valueOrigin == ArgParser.ValueOrigin.SET_BY_USER) ||
+            (cinteropArguments.linkerOption.valueOrigin == ArgParser.ValueOrigin.SET_BY_USER)
     if (flavorName == "native" && isLinkerOptsSetByUser) {
-        warn("-linker-option(s)/-linkerOpts/-lopt option is not supported by cinterop. Please add linker options to .def file or binary compilation instead.")
+        warn("-linker-option(s)/-linkerOpts option is not supported by cinterop. Please add linker options to .def file or binary compilation instead.")
     }
 
-    val additionalLinkerOpts = cinteropArguments.linkerOpts.toTypedArray() + cinteropArguments.linkerOption.toTypedArray() +
-            cinteropArguments.linkerOptions.toTypedArray() + cinteropArguments.lopt.toTypedArray()
+    val additionalLinkerOpts = cinteropArguments.linkerOpts.value.toTypedArray() + cinteropArguments.linkerOption.value.toTypedArray() +
+            cinteropArguments.linkerOptions.value.toTypedArray()
     val verbose = cinteropArguments.verbose
 
     val language = selectNativeLanguage(def.config)
@@ -204,22 +209,35 @@ private fun processCLib(args: Array<String>, additionalArgs: Map<String, Any> = 
     val fqParts = (cinteropArguments.pkg ?: def.config.packageName)?.split('.')
             ?: defFile!!.name.split('.').reversed().drop(1)
 
-    val outKtFileName = fqParts.last() + ".kt"
-
     val outKtPkg = fqParts.joinToString(".")
-    val outKtFileRelative = (fqParts + outKtFileName).joinToString("/")
-    val outKtFile = File(ktGenRoot, outKtFileRelative)
 
-    val libName = (additionalArgs["cstubsname"] as? String)?: fqParts.joinToString("") + "stubs"
+    val mode = parseGenerationMode(cinteropArguments.mode)
+            ?: error ("Unexpected interop generation mode: ${cinteropArguments.mode}")
+
+    val allLibraryDependencies = when (flavor) {
+        KotlinPlatform.NATIVE -> resolveDependencies(cinteropArguments, tool.target)
+        else -> listOf()
+    }
+
+    val libName = additionalArgs["cstubsName"] as? String ?: fqParts.joinToString("") + "stubs"
 
     val tempFiles = TempFiles(libName, cinteropArguments.tempDir)
 
-    val imports = parseImports((additionalArgs["import"] as? List<String>)?.toTypedArray() ?: arrayOf())
+    val imports = parseImports(allLibraryDependencies)
 
     val library = buildNativeLibrary(tool, def, cinteropArguments, imports)
 
     val (nativeIndex, compilation) = buildNativeIndex(library, verbose)
 
+    val moduleName = File(cinteropArguments.output).nameWithoutExtension
+
+    // Our current approach to arm64_32 support is to compile armv7k version of bitcode
+    // for arm64_32. That's the reason for this substitution.
+    // TODO: Add proper support with the next LLVM update.
+    val target = when (tool.target) {
+        KonanTarget.WATCHOS_ARM64 -> KonanTarget.WATCHOS_ARM32
+        else -> tool.target
+    }
     val configuration = InteropConfiguration(
             library = compilation,
             pkgName = outKtPkg,
@@ -230,10 +248,9 @@ private fun processCLib(args: Array<String>, additionalArgs: Map<String, Any> = 
             noStringConversion = def.config.noStringConversion.toSet(),
             exportForwardDeclarations = def.config.exportForwardDeclarations,
             disableDesignatedInitializerChecks = def.config.disableDesignatedInitializerChecks,
-            target = tool.target
+            target = target
     )
 
-    outKtFile.parentFile.mkdirs()
 
     File(nativeLibsDir).mkdirs()
     val outCFile = tempFiles.create(libName, ".${language.sourceFileExtension}")
@@ -245,8 +262,18 @@ private fun processCLib(args: Array<String>, additionalArgs: Map<String, Any> = 
     }
 
     val stubIrContext = StubIrContext(logger, configuration, nativeIndex, imports, flavor, libName)
-    val stubIrDriver = StubIrDriver(stubIrContext)
-    stubIrDriver.run(outKtFile, File(outCFile.absolutePath), entryPoint)
+    val stubIrOutput = run {
+        val outKtFileCreator = {
+            val outKtFileName = fqParts.last() + ".kt"
+            val outKtFileRelative = (fqParts + outKtFileName).joinToString("/")
+            val file = File(ktGenRoot, outKtFileRelative)
+            file.parentFile.mkdirs()
+            file
+        }
+        val driverOptions = StubIrDriver.DriverOptions(mode, entryPoint, moduleName, File(outCFile.absolutePath), outKtFileCreator)
+        val stubIrDriver = StubIrDriver(stubIrContext, driverOptions)
+        stubIrDriver.run()
+    }
 
     // TODO: if a library has partially included headers, then it shouldn't be used as a dependency.
     def.manifestAddendProperties["includedHeaders"] = nativeIndex.includedHeaders.joinToString(" ") { it.value }
@@ -255,39 +282,79 @@ private fun processCLib(args: Array<String>, additionalArgs: Map<String, Any> = 
         _, oldValue, newValue ->
             warn("The package value `$oldValue` specified in .def file is overridden with explicit $newValue")
     }
-
     def.manifestAddendProperties["interop"] = "true"
-
+    if (stubIrOutput is StubIrDriver.Result.Metadata) {
+        def.manifestAddendProperties["ir_provider"] = KLIB_INTEROP_IR_PROVIDER_IDENTIFIER
+    }
     stubIrContext.addManifestProperties(def.manifestAddendProperties)
 
     manifestAddend?.parentFile?.mkdirs()
     manifestAddend?.let { def.manifestAddendProperties.storeProperties(it) }
 
-    if (flavor == KotlinPlatform.JVM) {
+    val compilerArgs = stubIrContext.libraryForCStubs.compilerArgs.toTypedArray()
+    val nativeOutputPath: String = when (flavor) {
+        KotlinPlatform.JVM -> {
+            val outOFile = tempFiles.create(libName,".o")
+            val compilerCmd = arrayOf(compiler, *compilerArgs,
+                    "-c", outCFile.absolutePath, "-o", outOFile.absolutePath)
+            runCmd(compilerCmd, verbose)
 
-        val outOFile = tempFiles.create(libName,".o")
+            val outLib = File(nativeLibsDir, System.mapLibraryName(libName))
+            val linkerCmd = arrayOf(linker,
+                    outOFile.absolutePath, "-shared", "-o", outLib.absolutePath,
+                    *linkerOpts)
+            runCmd(linkerCmd, verbose)
+            outOFile.absolutePath
+        }
+        KotlinPlatform.NATIVE -> {
+            val outLib = File(nativeLibsDir, "$libName.bc")
+            val compilerCmd = arrayOf(compiler, *compilerArgs,
+                    "-emit-llvm", "-c", outCFile.absolutePath, "-o", outLib.absolutePath)
 
-        val compilerCmd = arrayOf(compiler, *stubIrContext.libraryForCStubs.compilerArgs.toTypedArray(),
-                "-c", outCFile.absolutePath, "-o", outOFile.absolutePath)
-
-        runCmd(compilerCmd, verbose)
-
-        val outLib = File(nativeLibsDir, System.mapLibraryName(libName))
-
-        val linkerCmd = arrayOf(linker,
-                outOFile.absolutePath, "-shared", "-o", outLib.absolutePath,
-                *linkerOpts)
-
-        runCmd(linkerCmd, verbose)
-    } else if (flavor == KotlinPlatform.NATIVE) {
-        val outBcName = libName + ".bc"
-        val outLib = File(nativeLibsDir, outBcName)
-        val compilerCmd = arrayOf(compiler, *stubIrContext.libraryForCStubs.compilerArgs.toTypedArray(),
-                "-emit-llvm", "-c", outCFile.absolutePath, "-o", outLib.absolutePath)
-
-        runCmd(compilerCmd, verbose)
+            runCmd(compilerCmd, verbose)
+            outLib.absolutePath
+        }
     }
-    return argsToCompiler(staticLibraries, libraryPaths)
+
+    return when (stubIrOutput) {
+        is StubIrDriver.Result.SourceCode -> {
+            argsToCompiler(staticLibraries, libraryPaths)
+        }
+        is StubIrDriver.Result.Metadata -> {
+            val args = LibraryCreationArguments(
+                    metadata = stubIrOutput.metadata,
+                    nativeBitcodePath = nativeOutputPath,
+                    target = tool.target,
+                    moduleName = moduleName,
+                    outputPath = cinteropArguments.output,
+                    manifest = def.manifestAddendProperties,
+                    dependencies = allLibraryDependencies
+            )
+            createInteropLibrary(args)
+            return null
+        }
+    }
+}
+
+private fun resolveDependencies(
+        cinteropArguments: CInteropArguments, target: KonanTarget
+): List<KotlinLibrary> {
+    val libraries = cinteropArguments.library
+    val repos = cinteropArguments.repo
+    val noDefaultLibs = cinteropArguments.nodefaultlibs || cinteropArguments.nodefaultlibsDeprecated
+    val noEndorsedLibs = cinteropArguments.noendorsedlibs
+    val resolver = defaultResolver(
+            repos,
+            libraries.filter { it.contains(org.jetbrains.kotlin.konan.file.File.separator) },
+            target,
+            Distribution()
+    ).libraryResolver()
+    return resolver.resolveWithDependencies(
+            libraries.toUnresolvedLibraries,
+            noStdLib = false,
+            noDefaultLibs = noDefaultLibs,
+            noEndorsedLibs = noEndorsedLibs
+    ).getFullList()
 }
 
 internal fun prepareTool(target: String?, flavor: KotlinPlatform): ToolConfig {
@@ -305,10 +372,9 @@ internal fun buildNativeLibrary(
         arguments: CInteropArguments,
         imports: ImportsImpl
 ): NativeLibrary {
-    val additionalHeaders = (arguments.header + arguments.shortHeaderForm).toTypedArray()
+    val additionalHeaders = (arguments.header).toTypedArray()
     val additionalCompilerOpts = (arguments.compilerOpts +
-            arguments.compilerOptions + arguments.compilerOption +
-            arguments.copt).toTypedArray()
+            arguments.compilerOptions + arguments.compilerOption).toTypedArray()
 
     val headerFiles = def.config.headers + additionalHeaders
     val language = selectNativeLanguage(def.config)

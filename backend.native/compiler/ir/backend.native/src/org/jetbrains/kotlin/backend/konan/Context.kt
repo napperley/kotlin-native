@@ -5,11 +5,8 @@
 
 package org.jetbrains.kotlin.backend.konan
 
-import llvm.LLVMDumpModule
-import llvm.LLVMModuleRef
+import llvm.*
 import org.jetbrains.kotlin.backend.common.DumpIrTreeWithDescriptorsVisitor
-import org.jetbrains.kotlin.backend.common.descriptors.WrappedSimpleFunctionDescriptor
-import org.jetbrains.kotlin.backend.common.descriptors.WrappedTypeParameterDescriptor
 import org.jetbrains.kotlin.backend.konan.descriptors.*
 import org.jetbrains.kotlin.backend.konan.ir.KonanIr
 import org.jetbrains.kotlin.library.SerializedMetadata
@@ -47,13 +44,14 @@ import java.lang.System.out
 import kotlin.LazyThreadSafetyMode.PUBLICATION
 import kotlin.reflect.KProperty
 import org.jetbrains.kotlin.backend.common.ir.copyTo
-import org.jetbrains.kotlin.backend.common.serialization.KotlinMangler
 import org.jetbrains.kotlin.backend.konan.objcexport.ObjCExport
 import org.jetbrains.kotlin.backend.konan.llvm.coverage.CoverageManager
+import org.jetbrains.kotlin.ir.descriptors.WrappedSimpleFunctionDescriptor
+import org.jetbrains.kotlin.ir.descriptors.WrappedTypeParameterDescriptor
 import org.jetbrains.kotlin.ir.symbols.impl.IrTypeParameterSymbolImpl
 import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.konan.library.KonanLibraryLayout
-import org.jetbrains.kotlin.library.SerializedIr
+import org.jetbrains.kotlin.library.SerializedIrModule
 
 /**
  * Offset for synthetic elements created by lowerings and not attributable to other places in the source code.
@@ -141,7 +139,10 @@ internal class SpecialDeclarationsFactory(val context: Context) : KotlinMangler 
                 isExternal = false,
                 isTailrec = false,
                 isSuspend = function.isSuspend,
-                returnType = returnType
+                returnType = returnType,
+                isExpect = false,
+                isFakeOverride = false,
+                isOperator = false
         ).apply {
             descriptor.bind(this)
             parent = function.parent
@@ -191,6 +192,7 @@ internal class SpecialDeclarationsFactory(val context: Context) : KotlinMangler 
 }
 
 internal class Context(config: KonanConfig) : KonanBackendContext(config) {
+    override val lateinitNullableFields = mutableMapOf<IrField, IrField>()
     lateinit var frontendServices: FrontendServices
     lateinit var environment: KotlinCoreEnvironment
     lateinit var bindingContext: BindingContext
@@ -266,11 +268,13 @@ internal class Context(config: KonanConfig) : KonanBackendContext(config) {
         ClassLayoutBuilder(irClass, this)
     }
 
+    lateinit var globalHierarchyAnalysisResult: GlobalHierarchyAnalysisResult
+
     // We serialize untouched descriptor tree and IR.
     // But we have to wait until the code generation phase,
     // to dump this information into generated file.
     var serializedMetadata: SerializedMetadata? = null
-    var serializedIr: SerializedIr? = null
+    var serializedIr: SerializedIrModule? = null
     var dataFlowGraph: ByteArray? = null
 
     val librariesWithDependencies by lazy {
@@ -325,6 +329,20 @@ internal class Context(config: KonanConfig) : KonanBackendContext(config) {
     lateinit var llvmDeclarations: LlvmDeclarations
     lateinit var bitcodeFileName: String
     lateinit var library: KonanLibraryLayout
+
+    private var llvmDisposed = false
+
+    fun disposeLlvm() {
+        if (llvmDisposed) return
+        if (::debugInfo.isInitialized)
+            LLVMDisposeDIBuilder(debugInfo.builder)
+        if (llvmModule != null)
+            LLVMDisposeModule(llvmModule)
+        if (::llvm.isInitialized)
+            LLVMDisposeModule(llvm.runtime.llvmModule)
+        tryDisposeLLVMContext()
+        llvmDisposed = true
+    }
 
     val cStubsManager = CStubsManager(config.target)
 
@@ -432,6 +450,7 @@ internal class Context(config: KonanConfig) : KonanBackendContext(config) {
     fun shouldContainAnyDebugInfo() = shouldContainDebugInfo() || shouldContainLocationDebugInfo()
 
     fun shouldOptimize() = config.configuration.getBoolean(KonanConfigKeys.OPTIMIZATION)
+    fun ghaEnabled() = ::globalHierarchyAnalysisResult.isInitialized
 
     val memoryModel = config.memoryModel
 
@@ -460,6 +479,12 @@ internal class Context(config: KonanConfig) : KonanBackendContext(config) {
         get() = this.builtIns.any.module
 
     lateinit var compilerOutput: List<ObjectFile>
+
+    val llvmModuleSpecification: LlvmModuleSpecification = LlvmModuleSpecificationImpl(
+            config.cachedLibraries,
+            producingCache = config.produce.isCache,
+            librariesToCache = config.librariesToCache
+    )
 }
 
 private fun MemberScope.getContributedClassifier(name: String) =

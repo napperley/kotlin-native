@@ -12,9 +12,8 @@ import org.gradle.api.Project
 import org.gradle.api.Task
 import org.gradle.api.tasks.TaskState
 import org.gradle.api.execution.TaskExecutionListener
-import org.gradle.api.tasks.AbstractExecTask
 import org.jetbrains.kotlin.gradle.plugin.KotlinTargetPreset
-import org.jetbrains.kotlin.gradle.plugin.mpp.KotlinNativeTarget
+import org.jetbrains.kotlin.gradle.plugin.mpp.NativeBuildType
 import org.jetbrains.kotlin.gradle.tasks.KotlinNativeLink
 import org.jetbrains.report.*
 import org.jetbrains.report.json.*
@@ -77,9 +76,19 @@ fun getFileSize(filePath: String): Long? {
 
 fun getCodeSizeBenchmark(programName: String, filePath: String): BenchmarkResult {
     val codeSize = getFileSize(filePath)
-    return BenchmarkResult("$programName",
+    return BenchmarkResult(programName,
             codeSize?. let { BenchmarkResult.Status.PASSED } ?: run { BenchmarkResult.Status.FAILED },
             codeSize?.toDouble() ?: 0.0, BenchmarkResult.Metric.CODE_SIZE, codeSize?.toDouble() ?: 0.0, 1, 0)
+}
+
+fun toCodeSizeBenchmark(metricDescription: String, status: String, programName: String): BenchmarkResult {
+    if (!metricDescription.startsWith("CODE_SIZE")) {
+        error("Wrong metric is used as code size.")
+    }
+    val codeSize = metricDescription.split(' ')[1].toDouble()
+    return BenchmarkResult(programName,
+            if (status == "PASSED") BenchmarkResult.Status.PASSED else BenchmarkResult.Status.FAILED,
+            codeSize, BenchmarkResult.Metric.CODE_SIZE, codeSize, 1, 0)
 }
 
 // Create benchmarks json report based on information get from gradle project
@@ -96,32 +105,50 @@ fun createJsonReport(projectProperties: Map<String, Any>): String {
     val benchmarksArray = JsonTreeParser.parse(benchDesc)
     val benchmarks = BenchmarksReport.parseBenchmarksArray(benchmarksArray)
             .union(projectProperties["compileTime"] as List<BenchmarkResult>).union(
-                    listOf(projectProperties["codeSize"] as BenchmarkResult)).toList()
+                    listOf(projectProperties["codeSize"] as? BenchmarkResult).filterNotNull()).toList()
     val report = BenchmarksReport(env, benchmarks, kotlin)
     return report.toJson()
 }
 
 fun mergeReports(reports: List<File>): String {
-    val reportsToMerge = reports.map {
+    val reportsToMerge = reports.filter { it.exists() }.map {
         val json = it.inputStream().bufferedReader().use { it.readText() }
         val reportElement = JsonTreeParser.parse(json)
         BenchmarksReport.create(reportElement)
-
     }
-    return if (reportsToMerge.isEmpty()) "" else reportsToMerge.reduce { result, it -> result + it }.toJson()
+    val structuredReports = mutableMapOf<String, MutableList<BenchmarksReport>>()
+    reportsToMerge.map { it.compiler.backend.flags.joinToString() to it }.forEach {
+        structuredReports.getOrPut(it.first) { mutableListOf<BenchmarksReport>() }.add(it.second)
+    }
+    val jsons = structuredReports.map { (_, value) -> value.reduce { result, it -> result + it }.toJson() }
+    return when(jsons.size) {
+        0 -> ""
+        1 -> jsons[0]
+        else -> jsons.joinToString(prefix = "[", postfix = "]")
+    }
 }
+
+fun getCompileOnlyBenchmarksOpts(project: Project, defaultCompilerOpts: List<String>) =
+        (project.findProperty("nativeBuildType") as String?)?.let {
+            if (it.equals("RELEASE", true))
+                listOf("-opt")
+            else if (it.equals("DEBUG", true))
+                listOf("-g")
+            else listOf()
+        } ?: defaultCompilerOpts
 
 // Find file with set name in directory.
 fun findFile(fileName: String, directory: String): String? =
     File(directory).walkBottomUp().find { it.name == fileName }?.getAbsolutePath()
 
-fun uploadFileToBintray(url: String, project: String, version: String, packageName: String, bintrayFilePath: String,
-                        filePath: String, username: String? = null, password: String? = null) {
-    val uploadUrl = "$url/$project/$packageName/$version/$bintrayFilePath?publish=1"
-    sendUploadRequest(uploadUrl, filePath, username, password)
+fun uploadFileToArtifactory(url: String, project: String, artifactoryFilePath: String,
+                        filePath: String, password: String) {
+    val uploadUrl = "$url/$project/$artifactoryFilePath"
+    sendUploadRequest(uploadUrl, filePath, extraHeaders = listOf(Pair("X-JFrog-Art-Api", password)))
 }
 
-fun sendUploadRequest(url: String, fileName: String, username: String? = null, password: String? = null) {
+fun sendUploadRequest(url: String, fileName: String, username: String? = null, password: String? = null,
+                      extraHeaders: List<Pair<String, String>> = emptyList()) {
     val uploadingFile = File(fileName)
     val connection = URL(url).openConnection() as HttpURLConnection
     connection.doOutput = true
@@ -132,7 +159,9 @@ fun sendUploadRequest(url: String, fileName: String, username: String? = null, p
         val auth = Base64.getEncoder().encode((username + ":" + password).toByteArray()).toString(Charsets.UTF_8)
         connection.addRequestProperty("Authorization", "Basic $auth")
     }
-
+    extraHeaders.forEach {
+        connection.addRequestProperty(it.first, it.second)
+    }
     try {
         connection.connect()
         BufferedOutputStream(connection.outputStream).use { output ->
@@ -152,21 +181,11 @@ fun sendUploadRequest(url: String, fileName: String, username: String? = null, p
 fun createRunTask(
         subproject: Project,
         name: String,
-        linkTask: KotlinNativeLink,
+        linkTask: Task,
+        executable: String,
         outputFileName: String
 ): Task {
-    return subproject.tasks.create(name, RunKotlinNativeTask::class.java, linkTask, outputFileName)
-}
-
-@JvmOverloads
-fun createBenchmarksRunTask(
-        subproject: Project,
-        name: String,
-        configureClosure: Closure<Any>? = null
-): Task {
-    val task = subproject.tasks.create(name, RunBenchmarksExecutableTask::class.java)
-    task.configure(configureClosure ?: task.emptyConfigureClosure())
-    return task
+    return subproject.tasks.create(name, RunKotlinNativeTask::class.java, linkTask, executable, outputFileName)
 }
 
 fun getJvmCompileTime(programName: String): BenchmarkResult =
@@ -186,9 +205,18 @@ fun getCompileBenchmarkTime(programName: String, tasksNames: Iterable<String>, r
             status = if (exitCodes["$it$number"] != 0) BenchmarkResult.Status.FAILED else status
         }
 
-        BenchmarkResult("$programName", status, time, BenchmarkResult.Metric.COMPILE_TIME, time, number, 0)
+        BenchmarkResult(programName, status, time, BenchmarkResult.Metric.COMPILE_TIME, time, number, 0)
     }.toList()
 
+fun toCompileBenchmark(metricDescription: String, status: String, programName: String): BenchmarkResult {
+    if (!metricDescription.startsWith("COMPILE_TIME")) {
+        error("Wrong metric is used as compile time.")
+    }
+    val time = metricDescription.split(' ')[1].toDouble()
+    return BenchmarkResult(programName,
+            if (status == "PASSED") BenchmarkResult.Status.PASSED else BenchmarkResult.Status.FAILED,
+            time, BenchmarkResult.Metric.COMPILE_TIME, time, 1, 0)
+}
 
 // Class time tracker for all tasks.
 class TaskTimerListener: TaskExecutionListener {
@@ -199,7 +227,7 @@ class TaskTimerListener: TaskExecutionListener {
             val time = tasksNames.map { tasksTimes[it] ?: 0.0 }.sum()
             // TODO get this info from gradle plugin with exit code end stacktrace.
             val status = tasksNames.map { tasksTimes.containsKey(it) }.reduce { a, b -> a && b }
-            return BenchmarkResult("$programName",
+            return BenchmarkResult(programName,
                                     if (status) BenchmarkResult.Status.PASSED else BenchmarkResult.Status.FAILED,
                                     time, BenchmarkResult.Metric.COMPILE_TIME, time, 1, 0)
         }

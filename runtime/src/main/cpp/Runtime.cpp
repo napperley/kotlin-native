@@ -19,17 +19,20 @@
 #include "Exceptions.h"
 #include "KAssert.h"
 #include "Memory.h"
+#include "ObjCExportInit.h"
 #include "Porting.h"
 #include "Runtime.h"
+#include "Worker.h"
 
 struct RuntimeState {
   MemoryState* memoryState;
+  Worker* worker;
   volatile int executionStatus;
 };
 
 typedef void (*Initializer)(int initialize);
 struct InitNode {
-  Initializer      init;
+  Initializer init;
   InitNode* next;
 };
 
@@ -80,7 +83,7 @@ inline bool isValidRuntime() {
   return ::runtimeState != kInvalidRuntime;
 }
 
-int aliveRuntimesCount = 0;
+volatile int aliveRuntimesCount = 0;
 
 RuntimeState* initRuntime() {
   SetKonanTerminateHandler();
@@ -89,11 +92,17 @@ RuntimeState* initRuntime() {
   RuntimeCheck(!isValidRuntime(), "No active runtimes allowed");
   ::runtimeState = result;
   result->memoryState = InitMemory();
+  result->worker = WorkerInit(true);
   bool firstRuntime = atomicAdd(&aliveRuntimesCount, 1) == 1;
   // Keep global variables in state as well.
   if (firstRuntime) {
     isMainThread = 1;
     konan::consoleInit();
+
+#if KONAN_OBJC_INTEROP
+    Kotlin_ObjCExport_initialize();
+#endif
+
     InitOrDeinitGlobalVariables(INIT_GLOBALS);
   }
   InitOrDeinitGlobalVariables(INIT_THREAD_LOCAL_GLOBALS);
@@ -106,6 +115,7 @@ void deinitRuntime(RuntimeState* state) {
   InitOrDeinitGlobalVariables(DEINIT_THREAD_LOCAL_GLOBALS);
   if (lastRuntime)
     InitOrDeinitGlobalVariables(DEINIT_GLOBALS);
+  WorkerDeinit(state->worker);
   DeinitMemory(state->memoryState);
   konanDestructInstance(state);
 }
@@ -160,6 +170,7 @@ RuntimeState* Kotlin_suspendRuntime() {
     auto result = ::runtimeState;
     RuntimeCheck(updateStatusIf(result, RUNNING, SUSPENDED), "Cannot transition state to SUSPENDED for suspend");
     result->memoryState = SuspendMemory();
+    result->worker = WorkerSuspend();
     ::runtimeState = kInvalidRuntime;
     return result;
 }
@@ -169,11 +180,16 @@ void Kotlin_resumeRuntime(RuntimeState* state) {
     RuntimeCheck(updateStatusIf(state, SUSPENDED, RUNNING), "Cannot transition state to RUNNING for resume");
     ::runtimeState = state;
     ResumeMemory(state->memoryState);
+    WorkerResume(state->worker);
 }
 
 RuntimeState* RUNTIME_USED Kotlin_getRuntime() {
   RuntimeCheck(isValidRuntime(), "Runtime must be active on the current thread");
   return ::runtimeState;
+}
+
+bool Kotlin_hasRuntime() {
+  return isValidRuntime();
 }
 
 void CheckIsMainThread() {
@@ -210,6 +226,10 @@ KInt Konan_Platform_getOsFamily() {
   return 5;
 #elif KONAN_WASM
   return 6;
+#elif KONAN_TVOS
+  return 7;
+#elif KONAN_WATCHOS
+  return 8;
 #else
 #warning "Unknown platform"
   return 0;
@@ -243,6 +263,10 @@ KInt Konan_Platform_getMemoryModel() {
 
 KBoolean Konan_Platform_isDebugBinary() {
   return KonanNeedDebugInfo ? true : false;
+}
+
+void Kotlin_zeroOutTLSGlobals() {
+  InitOrDeinitGlobalVariables(DEINIT_THREAD_LOCAL_GLOBALS);
 }
 
 }  // extern "C"

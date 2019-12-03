@@ -1,11 +1,14 @@
 package org.jetbrains.kotlin.backend.konan
 
 import org.jetbrains.kotlin.backend.common.*
+import org.jetbrains.kotlin.backend.common.extensions.IrPluginContext
 import org.jetbrains.kotlin.backend.common.extensions.IrGenerationExtension
 import org.jetbrains.kotlin.backend.common.phaser.*
 import org.jetbrains.kotlin.backend.common.serialization.DescriptorTable
+import org.jetbrains.kotlin.backend.common.serialization.metadata.KlibMetadataMonolithicSerializer
 import org.jetbrains.kotlin.backend.konan.descriptors.isForwardDeclarationModule
 import org.jetbrains.kotlin.backend.konan.descriptors.konanLibrary
+import org.jetbrains.kotlin.backend.konan.ir.IrProviderForInteropStubs
 import org.jetbrains.kotlin.backend.konan.ir.KonanSymbols
 import org.jetbrains.kotlin.backend.konan.llvm.*
 import org.jetbrains.kotlin.backend.konan.lower.ExpectToActualDefaultValueCopier
@@ -14,13 +17,19 @@ import org.jetbrains.kotlin.backend.konan.serialization.*
 import org.jetbrains.kotlin.cli.common.messages.AnalyzerWithCompilerReport
 import org.jetbrains.kotlin.config.CommonConfigurationKeys
 import org.jetbrains.kotlin.config.languageVersionSettings
+import org.jetbrains.kotlin.descriptors.ModuleDescriptor
 import org.jetbrains.kotlin.descriptors.konan.isKonanStdlib
 import org.jetbrains.kotlin.ir.declarations.IrFile
 import org.jetbrains.kotlin.ir.declarations.IrModuleFragment
+import org.jetbrains.kotlin.ir.util.DeclarationStubGenerator
 import org.jetbrains.kotlin.ir.util.SymbolTable
+import org.jetbrains.kotlin.ir.util.addChild
+import org.jetbrains.kotlin.ir.util.addFile
+import org.jetbrains.kotlin.ir.util.file
 import org.jetbrains.kotlin.konan.target.CompilerOutputKind
 import org.jetbrains.kotlin.psi2ir.Psi2IrConfiguration
 import org.jetbrains.kotlin.psi2ir.Psi2IrTranslator
+import org.jetbrains.kotlin.utils.DFS
 import java.util.Collections.emptySet
 
 internal fun moduleValidationCallback(state: ActionState, module: IrModuleFragment, context: Context) {
@@ -133,7 +142,29 @@ internal val psiToIrPhase = konanUnitPhase(
                     Psi2IrConfiguration(false))
             val generatorContext = translator.createGeneratorContext(moduleDescriptor, bindingContext, symbolTable)
 
+            translator.addPostprocessingStep { module ->
+                val extensions = IrGenerationExtension.getInstances(config.project)
+                val pluginContext = IrPluginContext(
+                    generatorContext.moduleDescriptor,
+                    generatorContext.bindingContext,
+                    generatorContext.languageVersionSettings,
+                    generatorContext.symbolTable,
+                    generatorContext.typeTranslator,
+                    generatorContext.irBuiltIns
+                )
+                extensions.forEach { extension ->
+                    extension.generate(module, pluginContext)
+                }
+            }
+
             val forwardDeclarationsModuleDescriptor = moduleDescriptor.allDependencyModules.firstOrNull { it.isForwardDeclarationModule }
+
+            val modulesWithoutDCE = moduleDescriptor.allDependencyModules
+                    .filter { !llvmModuleSpecification.isFinal && llvmModuleSpecification.containsModule(it) }
+
+            // Note: using [llvmModuleSpecification] since this phase produces IR for generating single LLVM module.
+
+            val exportedDependencies = (getExportedDependencies() + modulesWithoutDCE).distinct()
 
             val deserializer = KonanIrLinker(
                     moduleDescriptor,
@@ -141,7 +172,7 @@ internal val psiToIrPhase = konanUnitPhase(
                     generatorContext.irBuiltIns,
                     symbolTable,
                     forwardDeclarationsModuleDescriptor,
-                    getExportedDependencies()
+                    exportedDependencies
             )
 
             var dependenciesCount = 0
@@ -150,7 +181,14 @@ internal val psiToIrPhase = konanUnitPhase(
                 val dependencies = moduleDescriptor.allDependencyModules.filter {
                     config.librariesWithDependencies(moduleDescriptor).contains(it.konanLibrary)
                 }
-                for (dependency in dependencies) {
+
+                fun sortDependencies(dependencies: List<ModuleDescriptor>): Collection<ModuleDescriptor> {
+                    return DFS.topologicalOrder(dependencies) {
+                        it.allDependencyModules
+                    }.reversed()
+                }
+
+                for (dependency in sortDependencies(dependencies)) {
                     deserializer.deserializeIrModuleHeader(dependency)
                 }
                 if (dependencies.size == dependenciesCount) break
@@ -159,16 +197,26 @@ internal val psiToIrPhase = konanUnitPhase(
 
             val functionIrClassFactory = BuiltInFictitiousFunctionIrClassFactory(
                     symbolTable, generatorContext.irBuiltIns, reflectionTypes)
+            val irProviderForInteropStubs = IrProviderForInteropStubs()
             val symbols = KonanSymbols(this, symbolTable, symbolTable.lazyWrapper, functionIrClassFactory)
-            val module = translator.generateModuleFragment(generatorContext, environment.getSourceFiles(),
-                    deserializer, listOf(functionIrClassFactory))
+            val stubGenerator = DeclarationStubGenerator(
+                    moduleDescriptor, symbolTable,
+                    config.configuration.languageVersionSettings
+            )
+            val irProviders = listOf(irProviderForInteropStubs, functionIrClassFactory, deserializer, stubGenerator)
+            stubGenerator.setIrProviders(irProviders)
+            val module = translator.generateModuleFragment(generatorContext, environment.getSourceFiles(), irProviders)
+
+            if (this.stdlibModule in modulesWithoutDCE) {
+                functionIrClassFactory.buildAllClasses()
+            }
 
             irModule = module
-            irModules = deserializer.modules
+            irModules = deserializer.modules.filterValues { llvmModuleSpecification.containsModule(it) }
             ir.symbols = symbols
 
             functionIrClassFactory.module =
-                    (listOf(irModule!!) + irModules.values)
+                    (listOf(irModule!!) + deserializer.modules.values)
                             .single { it.descriptor.isKonanStdlib() }
         },
         name = "Psi2Ir",
@@ -186,19 +234,6 @@ internal val destroySymbolTablePhase = konanUnitPhase(
         prerequisite = setOf(createSymbolTablePhase)
 )
 
-internal val irGeneratorPluginsPhase = konanUnitPhase(
-        op = {
-            val extensions = IrGenerationExtension.getInstances(config.project)
-            extensions.forEach { extension ->
-                irModule!!.files.forEach {
-                    irFile -> extension.generate(irFile, this, bindingContext)
-                }
-            }
-        },
-        name = "IrGeneratorPlugins",
-        description = "Plugged-in ir generators"
-)
-
 // TODO: We copy default value expressions from expects to actuals before IR serialization,
 // because the current infrastructure doesn't allow us to get them at deserialization stage.
 // That requires some design and implementation work.
@@ -212,9 +247,12 @@ internal val copyDefaultValuesToActualPhase = konanUnitPhase(
 
 internal val serializerPhase = konanUnitPhase(
         op = {
-            val declarationTable = KonanDeclarationTable(irModule!!.irBuiltins, DescriptorTable())
-            serializedIr = KonanIrModuleSerializer(this, declarationTable).serializedIrModule(irModule!!)
-            val serializer = KonanSerializationUtil(this, config.configuration.get(CommonConfigurationKeys.METADATA_VERSION)!!, declarationTable)
+            val descriptorTable = DescriptorTable()
+            serializedIr = KonanIrModuleSerializer(this, irModule!!.irBuiltins, descriptorTable).serializedIrModule(irModule!!)
+            val serializer = KlibMetadataMonolithicSerializer(
+                this.config.configuration.languageVersionSettings,
+                config.configuration.get(CommonConfigurationKeys.METADATA_VERSION
+            )!!, descriptorTable, bindingContext)
             serializedMetadata = serializer.serializeModule(moduleDescriptor)
         },
         name = "Serializer",
@@ -255,6 +293,7 @@ internal val allLoweringsPhase = namedIrModulePhase(
                         name = "IrLowerByFile",
                         description = "IR Lowering by file",
                         lower = lateinitPhase then
+                                forLoopsPhase then
                                 stringConcatenationPhase then
                                 enumConstructorsPhase then
                                 initializersPhase then
@@ -263,7 +302,6 @@ internal val allLoweringsPhase = namedIrModulePhase(
                                 tailrecPhase then
                                 defaultParameterExtentPhase then
                                 innerClassPhase then
-                                forLoopsPhase then
                                 dataClassesPhase then
                                 builtinOperatorPhase then
                                 finallyBlocksPhase then
@@ -320,15 +358,45 @@ internal val dependenciesLowerPhase = SameTypeNamedPhaseWrapper(
             }
         })
 
+internal val entryPointPhase = SameTypeNamedPhaseWrapper(
+        name = "addEntryPoint",
+        description = "Add entry point for program",
+        prerequisite = emptySet(),
+        lower = object : CompilerPhase<Context, IrModuleFragment, IrModuleFragment> {
+            override fun invoke(phaseConfig: PhaseConfig, phaserState: PhaserState<IrModuleFragment>,
+                                context: Context, input: IrModuleFragment): IrModuleFragment {
+                assert(context.config.produce == CompilerOutputKind.PROGRAM)
+
+                val originalFile = context.ir.symbols.entryPoint!!.owner.file
+                val originalModule = originalFile.packageFragmentDescriptor.containingDeclaration
+                val file = if (context.llvmModuleSpecification.containsModule(originalModule)) {
+                    originalFile
+                } else {
+                    // `main` function is compiled to other LLVM module.
+                    // For example, test running support uses `main` defined in stdlib.
+                    context.irModule!!.addFile(originalFile.fileEntry, originalFile.fqName)
+                }
+
+                require(context.llvmModuleSpecification.containsModule(
+                        file.packageFragmentDescriptor.containingDeclaration))
+
+                file.addChild(makeEntryPoint(context))
+                return input
+            }
+        }
+)
+
 internal val bitcodePhase = namedIrModulePhase(
         name = "Bitcode",
         description = "LLVM Bitcode generation",
-        lower = buildDFGPhase then
+        lower = contextLLVMSetupPhase then
+                buildDFGPhase then
                 serializeDFGPhase then
                 deserializeDFGPhase then
                 devirtualizationPhase then
                 dcePhase then
-                contextLLVMSetupPhase then
+                createLLVMDeclarationsPhase then
+                ghaPhase then
                 RTTIPhase then
                 generateDebugInfoHeaderPhase then
                 escapeAnalysisPhase then
@@ -347,7 +415,6 @@ val toplevelPhase: CompilerPhase<*, Unit, Unit> = namedUnitPhase(
                 buildCExportsPhase then
                 psiToIrPhase then
                 destroySymbolTablePhase then
-                irGeneratorPluginsPhase then
                 copyDefaultValuesToActualPhase then
                 serializerPhase then
                 namedUnitPhase(
@@ -357,10 +424,12 @@ val toplevelPhase: CompilerPhase<*, Unit, Unit> = namedUnitPhase(
                                 allLoweringsPhase then // Lower current module first.
                                 dependenciesLowerPhase then // Then lower all libraries in topological order.
                                                             // With that we guarantee that inline functions are unlowered while being inlined.
+                                entryPointPhase then
                                 bitcodePhase then
                                 verifyBitcodePhase then
                                 printBitcodePhase then
                                 produceOutputPhase then
+                                disposeLLVMPhase then
                                 unitSink()
                 ) then
                 linkPhase
@@ -384,12 +453,14 @@ internal fun PhaseConfig.konanPhasesConfig(config: KonanConfig) {
         // Don't serialize anything to a final executable.
         disableUnless(serializerPhase, config.produce == CompilerOutputKind.LIBRARY)
         disableIf(dependenciesLowerPhase, config.produce == CompilerOutputKind.LIBRARY)
+        disableUnless(entryPointPhase, config.produce == CompilerOutputKind.PROGRAM)
         disableIf(bitcodePhase, config.produce == CompilerOutputKind.LIBRARY)
-        disableUnless(linkPhase, config.produce.isNativeBinary)
+        disableUnless(linkPhase, config.produce.involvesLinkStage)
         disableIf(testProcessorPhase, getNotNull(KonanConfigKeys.GENERATE_TEST_RUNNER) == TestRunnerKind.NONE)
         disableUnless(buildDFGPhase, getBoolean(KonanConfigKeys.OPTIMIZATION))
         disableUnless(devirtualizationPhase, getBoolean(KonanConfigKeys.OPTIMIZATION))
         disableUnless(dcePhase, getBoolean(KonanConfigKeys.OPTIMIZATION))
+        disableUnless(ghaPhase, getBoolean(KonanConfigKeys.OPTIMIZATION))
         disableUnless(verifyBitcodePhase, config.needCompilerVerification || getBoolean(KonanConfigKeys.VERIFY_BITCODE))
     }
 }

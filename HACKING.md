@@ -42,7 +42,7 @@ with the big traces.
 To perform memory profiling follow the steps above, and after attachment to the running process
 use "Start Object Allocation Recording" button. See https://www.yourkit.com/docs/java/help/allocations.jsp for more details.
 
- ## Compiler Gradle options
+## Compiler Gradle options
 
 There are several gradle flags one can use for Konan build.
 
@@ -93,6 +93,11 @@ To update the blackbox compiler tests set TeamCity build number in `gradle.prope
 * **-Ptest_verbose** enables printing compiler args and other helpful information during a test execution.
 
         ./gradlew -Ptest_verbose :backend.native:tests:mpp_optional_expectation
+        
+* **-Ptest_two_stage** enables two-stage compilation of tests. If two-stage compilation is enabled, test sources are compiled into a klibrary
+and then a final native binary is produced from this klibrary using the -Xinclude compiler flag.
+
+        ./gradlew -Ptest_two_stage backend.native:tests:array0
        
  ## Performance measurement
   
@@ -148,15 +153,15 @@ To update the blackbox compiler tests set TeamCity build number in `gradle.prope
  Output can be redirected to file with flag `--output/-o`.
  To get detailed information about supported options, please use `--help/-h`.
  
- Analyzer tool can compare both local files and files placed on Bintray/TeamCity.
+ Analyzer tool can compare both local files and files placed on Artifactory/TeamCity.
  
- File description stored on Bintray
+ File description stored on Artifactory
  
-    bintray:<build number>:<target (Linux|Windows10|MacOSX)>:<filename>
+    artifactory:<build number>:<target (Linux|Windows10|MacOSX)>:<filename>
     
  Example
     
-    bintray:1.2-dev-7942:Windows10:nativeReport.json
+    artifactory:1.2-dev-7942:Windows10:nativeReport.json
     
  File description stored on TeamCity
   
@@ -167,4 +172,54 @@ To update the blackbox compiler tests set TeamCity build number in `gradle.prope
      teamcity:id:42491947:nativeReport.json
      
  Pay attention, user and password information(with flag `-u <username>:<password>`) should be provided to get data from TeamCity.
-    
+   
+## Composite build and testing
+
+If you have a fix spanning both Kotlin and Kotlin/native workspaces you need to be able to test Kotlin/Native composite build. Here's how to do it manually:
+
+### Have a composite build with the proper Kotlin tag.
+
+Find the version of Kotlin the current native is guaranteed to build with. 
+The version is specified in `kotlin-native/gradle.properties`. For example:
+```
+kotlinVersion=1.3.70-dev-1526
+```
+Checkout `kotlin` workspace to tag `build-1.3.70-dev-1526`. Make sure its path ends with `.../kotlin`. 
+Otherwise issues will arise.
+Direct `kotlin-native` build to the kotlin with `kotlinProjectPath` in native's `gradle.properties`.
+
+Now you have the kotlin + kotlin-native combination that is known to build.
+Apply your fix on top of both workspaces and run 
+```
+$ ./gradlew dist
+```
+
+in `kotlin-native` to check the buildability.
+
+### Testing native
+
+For a quick check use:
+```
+$ ./gradlew sanity 2>&1 | tee log
+```
+
+For a longer, more thorough testing build the complete build. Make sure you are runing it on a osx. 
+
+
+Have a complete build:
+
+```
+$ ./gradlew bundle # includes dist as its part
+```
+
+then run two test sets:
+
+```
+$ ./gradlew backend.native:tests:run 2>&1 | tee log
+
+$ ./gradlew backend.native:tests:runExternal -Ptest_two_stage=true 2>&1 | tee log
+
+```
+
+
+

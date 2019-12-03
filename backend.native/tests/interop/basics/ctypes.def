@@ -49,3 +49,53 @@ static int vlaSum2DForward(int size; int array[][size], int size) {
     return vlaSum2D(size, array);
 }
 */
+
+// "Strict" enums heuristic based on whether enum constants are defined explicitly:
+enum StrictEnum1 {
+    StrictEnum1A,
+    StrictEnum1B
+};
+
+enum StrictEnum2 {
+    StrictEnum2A __attribute__((unused)),
+    StrictEnum2B __attribute__((unused))
+};
+
+enum NonStrictEnum1 {
+    NonStrictEnum1A = 0,
+    NonStrictEnum1B __attribute__((unused))
+};
+
+enum NonStrictEnum2 {
+    NonStrictEnum2A,
+    NonStrictEnum2B __attribute__((unused)) = 1
+};
+
+// KT-34025
+typedef char Char;
+enum EnumCharBase : Char {
+    EnumCharBaseA,
+    EnumCharBaseB
+};
+
+static int sendEnum(enum EnumCharBase x) {
+	return (int)x + 2;
+}
+
+enum EnumExplicitChar : char {
+	EnumExplicitCharA = 'a',
+	EnumExplicitCharB = 'b',
+	EnumExplicitCharDup = 'a'
+};
+
+typedef float __attribute__ ((__vector_size__ (16)))   KVector4f;
+typedef int   __attribute__ ((__vector_size__ (16)))   KVector4i32;
+
+static float sendV4F(KVector4f v) {
+	return v[0] + 2 * v[1] + 4 * v[2] + 8 * v[3];
+}
+
+static int sendV4I(KVector4i32 v) {
+	return v[0] + 2 * v[1] + 4 * v[2] + 8 * v[3];
+}
+

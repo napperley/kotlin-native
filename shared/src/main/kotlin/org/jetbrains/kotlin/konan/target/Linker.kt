@@ -75,10 +75,12 @@ abstract class LinkerFlags(val configurables: Configurables)
 
     open val useCompilerDriverAsLinker: Boolean get() = false // TODO: refactor.
 
+    // TODO: Number of arguments is quite big. Better to pass args via object.
     abstract fun linkCommands(objectFiles: List<ObjectFile>, executable: ExecutableFile,
                               libraries: List<String>, linkerArgs: List<String>,
                               optimize: Boolean, debug: Boolean,
-                              kind: LinkerOutputKind, outputDsymBundle: String): List<Command>
+                              kind: LinkerOutputKind, outputDsymBundle: String,
+                              needsProfileLibrary: Boolean): List<Command>
 
     abstract fun filterStaticLibraries(binaries: List<String>): List<String>
 
@@ -87,13 +89,27 @@ abstract class LinkerFlags(val configurables: Configurables)
         // Let's just pass them as absolute paths.
         return libraries
     }
+
+    protected open fun provideCompilerRtLibrary(libraryName: String): String? {
+        System.err.println("Can't provide $libraryName.")
+        return null
+    }
+
+    // Code coverage requires this library.
+    protected val profileLibrary: String? by lazy {
+        provideCompilerRtLibrary("profile")
+    }
 }
 
 open class AndroidLinker(targetProperties: AndroidConfigurables)
     : LinkerFlags(targetProperties), AndroidConfigurables by targetProperties {
 
-    private val prefix = "$absoluteTargetToolchain/bin/"
-    private val clang = if (HostManager.hostIsMingw) "$prefix/clang.cmd" else "$prefix/clang"
+    private val clangQuad = when (targetProperties.targetArg) {
+        "arm-linux-androideabi" -> "armv7a-linux-androideabi"
+        else -> targetProperties.targetArg
+    }
+    private val prefix = "$absoluteTargetToolchain/bin/${clangQuad}${Android.API}"
+    private val clang = if (HostManager.hostIsMingw) "$prefix-clang.cmd" else "$prefix-clang"
     private val ar = "$absoluteTargetToolchain/${targetProperties.targetArg}/bin/ar"
 
     override val useCompilerDriverAsLinker: Boolean get() = true
@@ -103,18 +119,29 @@ open class AndroidLinker(targetProperties: AndroidConfigurables)
     override fun linkCommands(objectFiles: List<ObjectFile>, executable: ExecutableFile,
                               libraries: List<String>, linkerArgs: List<String>,
                               optimize: Boolean, debug: Boolean,
-                              kind: LinkerOutputKind, outputDsymBundle: String): List<Command> {
+                              kind: LinkerOutputKind, outputDsymBundle: String,
+                              needsProfileLibrary: Boolean): List<Command> {
         if (kind == LinkerOutputKind.STATIC_LIBRARY)
             return staticGnuArCommands(ar, executable, objectFiles, libraries)
 
         val dynamic = kind == LinkerOutputKind.DYNAMIC_LIBRARY
-        // liblog.so must be linked in, as we use its functionality in runtime.
+        val toolchainSysroot = "${absoluteTargetToolchain}/sysroot"
+        val architectureDir = Android.architectureDirForTarget(target)
+        val apiSysroot = "$absoluteTargetSysRoot/$architectureDir"
+        val clangTarget = targetArg!!
+        val libDirs = listOf(
+                "--sysroot=$apiSysroot",
+                if (target == KonanTarget.ANDROID_X64) "-L$apiSysroot/usr/lib64" else "-L$apiSysroot/usr/lib",
+                "-L$toolchainSysroot/usr/lib/$clangTarget/${Android.API}",
+                "-L$toolchainSysroot/usr/lib/$clangTarget")
         return listOf(Command(clang).apply {
             +"-o"
             +executable
             +"-fPIC"
             +"-shared"
-            +"-llog"
+            +"-target"
+            +targetArg!!
+            +libDirs
             +objectFiles
             if (optimize) +linkerOptimizationFlags
             if (!debug) +linkerNoDebugFlags
@@ -133,31 +160,30 @@ open class MacOSBasedLinker(targetProperties: AppleConfigurables)
     private val libtool = "$absoluteTargetToolchain/usr/bin/libtool"
     private val linker = "$absoluteTargetToolchain/usr/bin/ld"
     private val strip = "$absoluteTargetToolchain/usr/bin/strip"
-    private val dsymutil = "$absoluteLlvmHome/bin/llvm-dsymutil"
+    private val dsymutil = "$absoluteTargetToolchain/usr/bin/dsymutil"
 
-    private fun provideCompilerRtLibrary(libraryName: String): String? {
-        val suffix = if (libraryName.isNotEmpty() && target == KonanTarget.IOS_X64) {
-            "iossim"
-        } else {
-            when (val family = configurables.target.family) {
-                Family.OSX -> "osx"
-                Family.IOS -> "ios"
-                else -> error("Family $family is unsupported")
-            }
+    private val KonanTarget.isSimulator: Boolean
+        get() = this == KonanTarget.TVOS_X64 || this == KonanTarget.IOS_X64 ||
+                this == KonanTarget.WATCHOS_X86 || this == KonanTarget.WATCHOS_X64
+
+    override fun provideCompilerRtLibrary(libraryName: String): String? {
+        val prefix = when (target.family) {
+            Family.IOS -> "ios"
+            Family.WATCHOS -> "watchos"
+            Family.TVOS -> "tvos"
+            Family.OSX -> "osx"
+            else -> error("Target $target is unsupported")
         }
+        val suffix = if (libraryName.isNotEmpty() && target.isSimulator) {
+            "sim"
+        } else {
+            ""
+        }
+
         val dir = File("$absoluteTargetToolchain/usr/lib/clang/").listFiles.firstOrNull()?.absolutePath
-        val mangledName = if (libraryName.isEmpty()) "" else "${libraryName}_"
+        val mangledLibraryName = if (libraryName.isEmpty()) "" else "${libraryName}_"
 
-        return if (dir != null) "$dir/lib/darwin/libclang_rt.$mangledName$suffix.a" else null
-    }
-
-    private val compilerRtLibrary: String? by lazy {
-        provideCompilerRtLibrary("")
-    }
-
-    // Code coverage requires this library.
-    private val profileLibrary: String? by lazy {
-        provideCompilerRtLibrary("profile")
+        return if (dir != null) "$dir/lib/darwin/libclang_rt.$mangledLibraryName$prefix$suffix.a" else null
     }
 
     private val osVersionMinFlags: List<String> by lazy {
@@ -169,7 +195,8 @@ open class MacOSBasedLinker(targetProperties: AppleConfigurables)
     override fun linkCommands(objectFiles: List<ObjectFile>, executable: ExecutableFile,
                               libraries: List<String>, linkerArgs: List<String>,
                               optimize: Boolean, debug: Boolean, kind: LinkerOutputKind,
-                              outputDsymBundle: String): List<Command> {
+                              outputDsymBundle: String,
+                              needsProfileLibrary: Boolean): List<Command> {
         if (kind == LinkerOutputKind.STATIC_LIBRARY)
             return listOf(Command(libtool).apply {
                 +"-static"
@@ -192,7 +219,7 @@ open class MacOSBasedLinker(targetProperties: AppleConfigurables)
             if (dynamic) +linkerDynamicFlags
             +linkerKonanFlags
             if (compilerRtLibrary != null) +compilerRtLibrary!!
-            if (profileLibrary != null) +profileLibrary!!
+            if (needsProfileLibrary) +profileLibrary!!
             +libraries
             +linkerArgs
             +rpath(dynamic)
@@ -209,10 +236,16 @@ open class MacOSBasedLinker(targetProperties: AppleConfigurables)
         return result
     }
 
+    private val compilerRtLibrary: String? by lazy {
+        provideCompilerRtLibrary("")
+    }
+
     private fun rpath(dynamic: Boolean): List<String> = listOfNotNull(
             when (target.family) {
                 Family.OSX -> "@executable_path/../Frameworks"
-                Family.IOS -> "@executable_path/Frameworks"
+                Family.IOS,
+                Family.WATCHOS,
+                Family.TVOS -> "@executable_path/Frameworks"
                 else -> error(target)
             },
             "@loader_path/Frameworks".takeIf { dynamic }
@@ -271,12 +304,22 @@ open class LinuxBasedLinker(targetProperties: LinuxBasedConfigurables)
     private val linker = "$absoluteLlvmHome/bin/ld.lld"
     private val specificLibs = abiSpecificLibraries.map { "-L${absoluteTargetSysRoot}/$it" }
 
+    override fun provideCompilerRtLibrary(libraryName: String): String? {
+        val targetSuffix = when (target) {
+            KonanTarget.LINUX_X64 -> "x86_64"
+            else -> error("$target is not supported.")
+        }
+        val dir = File("$absoluteLlvmHome/lib/clang/").listFiles.firstOrNull()?.absolutePath
+        return if (dir != null) "$dir/lib/linux/libclang_rt.$libraryName-$targetSuffix.a" else null
+    }
+
     override fun filterStaticLibraries(binaries: List<String>) = binaries.filter { it.isUnixStaticLib }
 
     override fun linkCommands(objectFiles: List<ObjectFile>, executable: ExecutableFile,
                               libraries: List<String>, linkerArgs: List<String>,
                               optimize: Boolean, debug: Boolean,
-                              kind: LinkerOutputKind, outputDsymBundle: String): List<Command> {
+                              kind: LinkerOutputKind, outputDsymBundle: String,
+                              needsProfileLibrary: Boolean): List<Command> {
         if (kind == LinkerOutputKind.STATIC_LIBRARY)
             return staticGnuArCommands(ar, executable, objectFiles, libraries)
 
@@ -307,6 +350,9 @@ open class LinuxBasedLinker(targetProperties: LinuxBasedConfigurables)
             if (!debug) +linkerNoDebugFlags
             if (dynamic) +linkerDynamicFlags
             +objectFiles
+            // See explanation about `-u__llvm_profile_runtime` here:
+            // https://github.com/llvm/llvm-project/blob/21e270a479a24738d641e641115bce6af6ed360a/llvm/lib/Transforms/Instrumentation/InstrProfiling.cpp#L930
+            if (needsProfileLibrary) +listOf("-u__llvm_profile_runtime", profileLibrary!!)
             +linkerKonanFlags
             +listOf("-lgcc", "--as-needed", "-lgcc_s", "--no-as-needed",
                     "-lc", "-lgcc", "--as-needed", "-lgcc_s", "--no-as-needed")
@@ -328,10 +374,20 @@ open class MingwLinker(targetProperties: MingwConfigurables)
 
     override fun filterStaticLibraries(binaries: List<String>) = binaries.filter { it.isWindowsStaticLib || it.isUnixStaticLib }
 
+    override fun provideCompilerRtLibrary(libraryName: String): String? {
+        val targetSuffix = when (target) {
+            KonanTarget.MINGW_X64 -> "x86_64"
+            else -> error("$target is not supported.")
+        }
+        val dir = File("$absoluteLlvmHome/lib/clang/").listFiles.firstOrNull()?.absolutePath
+        return if (dir != null) "$dir/lib/windows/libclang_rt.$libraryName-$targetSuffix.a" else null
+    }
+
     override fun linkCommands(objectFiles: List<ObjectFile>, executable: ExecutableFile,
                               libraries: List<String>, linkerArgs: List<String>,
                               optimize: Boolean, debug: Boolean,
-                              kind: LinkerOutputKind, outputDsymBundle: String): List<Command> {
+                              kind: LinkerOutputKind, outputDsymBundle: String,
+                              needsProfileLibrary: Boolean): List<Command> {
         if (kind == LinkerOutputKind.STATIC_LIBRARY)
             return staticGnuArCommands(ar, executable, objectFiles, libraries)
 
@@ -342,10 +398,14 @@ open class MingwLinker(targetProperties: MingwConfigurables)
         }.apply {
             +listOf("-o", executable)
             +objectFiles
-            if (optimize) +linkerOptimizationFlags
+            // --gc-sections flag may affect profiling.
+            // See https://clang.llvm.org/docs/SourceBasedCodeCoverage.html#drawbacks-and-limitations.
+            // TODO: switching to lld may help.
+            if (optimize && !needsProfileLibrary) +linkerOptimizationFlags
             if (!debug) +linkerNoDebugFlags
             if (dynamic) +linkerDynamicFlags
             +libraries
+            if (needsProfileLibrary) +profileLibrary!!
             +linkerArgs
             +linkerKonanFlags
         })
@@ -362,15 +422,19 @@ open class WasmLinker(targetProperties: WasmConfigurables)
     override fun linkCommands(objectFiles: List<ObjectFile>, executable: ExecutableFile,
                               libraries: List<String>, linkerArgs: List<String>,
                               optimize: Boolean, debug: Boolean,
-                              kind: LinkerOutputKind, outputDsymBundle: String): List<Command> {
+                              kind: LinkerOutputKind, outputDsymBundle: String,
+                              needsProfileLibrary: Boolean): List<Command> {
         if (kind != LinkerOutputKind.EXECUTABLE) throw Error("Unsupported linker output kind")
 
+        val linkage = Command("$llvmBin/wasm-ld").apply {
+            +objectFiles
+            +listOf("-o", executable)
+            +lldFlags
+        }
+
         // TODO(horsh): maybe rethink it.
-        return listOf(object : Command() {
+        val jsBindingsGeneration = object : Command() {
             override fun execute() {
-                val src = File(objectFiles.single())
-                val dst = File(executable)
-                src.recursiveCopyTo(dst)
                 javaScriptLink(libraries, executable)
             }
 
@@ -393,7 +457,8 @@ open class WasmLinker(targetProperties: WasmConfigurables)
                 linkedJavaScript.appendBytes(linkerFooter.toByteArray())
                 return linkedJavaScript.name
             }
-        })
+        }
+        return listOf(linkage, jsBindingsGeneration)
     }
 }
 
@@ -409,7 +474,8 @@ open class ZephyrLinker(targetProperties: ZephyrConfigurables)
     override fun linkCommands(objectFiles: List<ObjectFile>, executable: ExecutableFile,
                               libraries: List<String>, linkerArgs: List<String>,
                               optimize: Boolean, debug: Boolean,
-                              kind: LinkerOutputKind, outputDsymBundle: String): List<Command> {
+                              kind: LinkerOutputKind, outputDsymBundle: String,
+                              needsProfileLibrary: Boolean): List<Command> {
         if (kind != LinkerOutputKind.EXECUTABLE) throw Error("Unsupported linker output kind: $kind")
         return listOf(Command(linker).apply {
             +listOf("-r", "--gc-sections", "--entry", "main")
@@ -425,16 +491,27 @@ fun linker(configurables: Configurables): LinkerFlags =
         when (configurables.target) {
             KonanTarget.LINUX_X64, KonanTarget.LINUX_ARM32_HFP,  KonanTarget.LINUX_ARM64 ->
                 LinuxBasedLinker(configurables as LinuxConfigurables)
+
             KonanTarget.LINUX_MIPS32, KonanTarget.LINUX_MIPSEL32 ->
                 LinuxBasedLinker(configurables as LinuxMIPSConfigurables)
-            KonanTarget.MACOS_X64, KonanTarget.IOS_ARM32, KonanTarget.IOS_ARM64, KonanTarget.IOS_X64 ->
+
+            KonanTarget.MACOS_X64,
+            KonanTarget.TVOS_X64, KonanTarget.TVOS_ARM64,
+            KonanTarget.IOS_ARM32, KonanTarget.IOS_ARM64, KonanTarget.IOS_X64,
+            KonanTarget.WATCHOS_ARM64, KonanTarget.WATCHOS_ARM32,
+            KonanTarget.WATCHOS_X64, KonanTarget.WATCHOS_X86 ->
                 MacOSBasedLinker(configurables as AppleConfigurables)
-            KonanTarget.ANDROID_ARM32, KonanTarget.ANDROID_ARM64 ->
+
+            KonanTarget.ANDROID_ARM32, KonanTarget.ANDROID_ARM64,
+            KonanTarget.ANDROID_X86, KonanTarget.ANDROID_X64 ->
                 AndroidLinker(configurables as AndroidConfigurables)
+
             KonanTarget.MINGW_X64, KonanTarget.MINGW_X86 ->
                 MingwLinker(configurables as MingwConfigurables)
+
             KonanTarget.WASM32 ->
                 WasmLinker(configurables as WasmConfigurables)
+
             is KonanTarget.ZEPHYR ->
                 ZephyrLinker(configurables as ZephyrConfigurables)
         }

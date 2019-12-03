@@ -16,7 +16,6 @@
 
 package org.jetbrains.kotlin.native.interop.gen
 
-import org.jetbrains.kotlin.konan.target.KonanTarget
 import org.jetbrains.kotlin.native.interop.indexer.*
 
 internal fun ObjCMethod.getKotlinParameterNames(forConstructorOrFactory: Boolean = false): List<String> {
@@ -71,7 +70,7 @@ private fun ObjCMethod.getKotlinParameters(
     if (this.isInit && this.parameters.isEmpty() && this.selector != "init") {
         // Create synthetic Unit parameter, just like Swift does in this case:
         val parameterName = this.selector.removePrefix("init").removePrefix("With").decapitalize()
-        return listOf(FunctionParameterStub(parameterName, WrapperStubType(KotlinTypes.unit)))
+        return listOf(FunctionParameterStub(parameterName, KotlinTypes.unit.toStubIrType()))
         // Note: this parameter is explicitly handled in compiler.
     }
 
@@ -82,12 +81,12 @@ private fun ObjCMethod.getKotlinParameters(
         val kotlinType = stubIrBuilder.mirror(it.type).argType
         val name = names[index]
         val annotations = if (it.nsConsumed) listOf(AnnotationStub.ObjC.Consumed) else emptyList()
-        FunctionParameterStub(name, WrapperStubType(kotlinType), isVararg = false, annotations = annotations)
+        FunctionParameterStub(name, kotlinType.toStubIrType(), isVararg = false, annotations = annotations)
     }
     if (this.isVariadic) {
         result += FunctionParameterStub(
                 names.last(),
-                WrapperStubType(KotlinTypes.any.makeNullable()),
+                KotlinTypes.any.makeNullable().toStubIrType(),
                 isVararg = true,
                 annotations = emptyList()
         )
@@ -115,10 +114,10 @@ private class ObjCMethodStubBuilder(
         val returnType = method.getReturnType(container.classOrProtocol)
         isStret = returnType.isStret(context.configuration.target)
         stubReturnType = if (returnType.unwrapTypedefs() is VoidType) {
-            WrapperStubType(KotlinTypes.unit)
+            KotlinTypes.unit
         } else {
-            WrapperStubType(context.mirror(returnType).argType)
-        }
+            context.mirror(returnType).argType
+        }.toStubIrType()
         val methodAnnotation = AnnotationStub.ObjC.Method(
                 method.selector,
                 method.encoding,
@@ -133,7 +132,7 @@ private class ObjCMethodStubBuilder(
                     MemberStubModality.OVERRIDE
                 } else when (container) {
                     is ObjCClass -> MemberStubModality.OPEN
-                    is ObjCProtocol -> MemberStubModality.OPEN
+                    is ObjCProtocol -> MemberStubModality.ABSTRACT
                 }
             }
             is ObjCCategory -> MemberStubModality.FINAL
@@ -190,7 +189,7 @@ private class ObjCMethodStubBuilder(
                     val annotations = buildObjCMethodAnnotations(factoryAnnotation)
 
                     val originalReturnType = method.getReturnType(container.clazz)
-                    val typeParameter = TypeParameterStub("T", WrapperStubType(clazz))
+                    val typeParameter = TypeParameterStub("T", clazz.toStubIrType())
                     val returnType = if (originalReturnType is ObjCPointer) {
                         typeParameter.getStubType(originalReturnType.isNullable)
                     } else {
@@ -239,77 +238,11 @@ internal val ObjCContainer.classOrProtocol: ObjCClassOrProtocol
         is ObjCCategory -> this.clazz
     }
 
-/**
- * objc_msgSend*_stret functions must be used when return value is returned through memory
- * pointed by implicit argument, which is passed on the register that would otherwise be used for receiver.
- *
- * The entire implementation is just the real ABI approximation which is enough for practical cases.
- */
-internal fun Type.isStret(target: KonanTarget): Boolean {
-    val unwrappedType = this.unwrapTypedefs()
-    return when (target) {
-        KonanTarget.IOS_ARM64 ->
-            false // On aarch64 stret is never the case, since an implicit argument gets passed on x8.
-
-        KonanTarget.IOS_X64, KonanTarget.MACOS_X64 -> when (unwrappedType) {
-            is RecordType -> unwrappedType.decl.def!!.size > 16 || this.hasUnalignedMembers()
-            else -> false
-        }
-        KonanTarget.IOS_ARM32 -> {
-            when (unwrappedType) {
-                is RecordType -> !this.isIntegerLikeType()
-                else -> false
-            }
-        }
-
-        else -> error(target)
-    }
-}
-
 private fun deprecatedInit(className: String, initParameterNames: List<String>, factory: Boolean): AnnotationStub {
     val replacement = if (factory) "$className.create" else className
     val replacementKind = if (factory) "factory method" else "constructor"
     val replaceWith = "$replacement(${initParameterNames.joinToString { it.asSimpleName() }})"
     return AnnotationStub.Deprecated("Use $replacementKind instead", replaceWith)
-}
-
-private fun Type.isIntegerLikeType(): Boolean = when (this) {
-    is RecordType -> {
-        val def = this.decl.def
-        if (def == null) {
-            false
-        } else {
-            def.size <= 4 &&
-                    def.members.all {
-                        when (it) {
-                            is BitField -> it.type.isIntegerLikeType()
-                            is Field -> it.offset == 0L && it.type.isIntegerLikeType()
-                            is IncompleteField -> false
-                        }
-                    }
-        }
-    }
-    is ObjCPointer, is PointerType, CharType, is BoolType -> true
-    is IntegerType -> this.size <= 4
-    is Typedef -> this.def.aliased.isIntegerLikeType()
-    is EnumType -> this.def.baseType.isIntegerLikeType()
-
-    else -> false
-}
-
-private fun Type.hasUnalignedMembers(): Boolean = when (this) {
-    is Typedef -> this.def.aliased.hasUnalignedMembers()
-    is RecordType -> this.decl.def!!.let { def ->
-        def.fields.any {
-            !it.isAligned ||
-                    // Check members of fields too:
-                    it.type.hasUnalignedMembers()
-        }
-    }
-    is ArrayType -> this.elemType.hasUnalignedMembers()
-    else -> false
-
-// TODO: should the recursive checks be made in indexer when computing `hasUnalignedFields`?
 }
 
 internal val ObjCMethod.kotlinName: String
@@ -480,19 +413,19 @@ internal abstract class ObjCContainerStubBuilder(
             } else {
                 if (isMeta) KotlinTypes.objCObjectBaseMeta else KotlinTypes.objCObjectBase
             }
-            interfaces += WrapperStubType(baseClassifier.type)
+            interfaces += baseClassifier.type.toStubIrType()
         }
         container.protocols.forEach {
-            interfaces += WrapperStubType(context.getKotlinClassFor(it, isMeta).type)
+            interfaces += context.getKotlinClassFor(it, isMeta).type.toStubIrType()
         }
         if (interfaces.isEmpty()) {
             assert(container is ObjCProtocol)
             val classifier = if (isMeta) KotlinTypes.objCObjectMeta else KotlinTypes.objCObject
-            interfaces += WrapperStubType(classifier.type)
+            interfaces += classifier.type.toStubIrType()
         }
         if (!isMeta && container.isProtocolClass()) {
             // TODO: map Protocol type to ObjCProtocol instead.
-            interfaces += WrapperStubType(KotlinTypes.objCProtocol.type)
+            interfaces += KotlinTypes.objCProtocol.type.toStubIrType()
         }
         interfaces
     }
@@ -557,7 +490,7 @@ internal class ObjCClassStubBuilder(
 
         val objCClassType = KotlinTypes.objCClassOf.typeWith(
                 context.getKotlinClassFor(clazz, isMeta = false).type
-        ).let { WrapperStubType(it) }
+        ).toStubIrType()
 
         val superClassInit = SuperClassInit(companionSuper)
         val companion = ClassStub.Companion(superClassInit, listOf(objCClassType))
@@ -641,7 +574,8 @@ private class ObjCPropertyStubBuilder(
             is ObjCClassOrProtocol -> null
             is ObjCCategory -> ClassifierStubType(context.getKotlinClassFor(container.clazz, isMeta = property.getter.isClass))
         }
-        return listOf(PropertyStub(property.name, WrapperStubType(kotlinType), kind, modality, receiver))
+        val origin = StubOrigin.ObjCProperty(property, container)
+        return listOf(PropertyStub(property.name, kotlinType.toStubIrType(), kind, modality, receiver, origin = origin))
     }
 }
 

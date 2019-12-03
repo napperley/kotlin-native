@@ -49,6 +49,17 @@ enum class Enum(val code: Int) {
     HUNDRED(100)
 }
 
+
+interface Interface {
+    fun foo(): Int
+}
+
+enum class EnumWithInterface : Interface {
+    ZERO
+    ;
+    override fun foo(): Int = 42
+}
+
 // Object.
 interface Codeable {
     fun asCode(): Int
@@ -128,3 +139,5 @@ fun getNullableString(param: Int) : String? {
         return null
     }
 }
+
+fun getVector128() = vectorOf(1, 2, 3, 4)

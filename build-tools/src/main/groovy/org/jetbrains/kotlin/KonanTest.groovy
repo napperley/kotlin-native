@@ -16,6 +16,7 @@
 
 package org.jetbrains.kotlin
 
+import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.JavaExec
 import org.gradle.api.tasks.TaskAction
 import org.gradle.process.ExecResult
@@ -297,6 +298,14 @@ class RunExternalTestGroup extends OldKonanTest {
      */
     public def inDevelopersRun = false
 
+    /**
+     * If true, the test executable will be built in two stages:
+     * 1. Build a klibrary from sources.
+     * 2. Build a final executable from this klibrary.
+     */
+    @Input
+    public def enableTwoStageCompilation = false
+
     def groupDirectory = "."
     def outputSourceSetName = "testOutputExternal"
     String filter = project.findProperty("filter")
@@ -506,10 +515,7 @@ fun runTest() {
     }
 
     static def excludeList = [
-            "build/external/compiler/codegen/box/functions/functionExpression/functionExpressionWithThisReference.kt", // KT-26973
-            "build/external/compiler/codegen/box/inlineClasses/kt27096_innerClass.kt", // KT-27665
-            "build/external/compiler/codegen/boxInline/anonymousObject/kt8133.kt",
-            "build/external/compiler/codegen/box/localClasses/anonymousObjectInExtension.kt" // KT-29282
+            "build/external/compiler/codegen/boxInline/anonymousObject/kt8133.kt"  // KT-34066
     ]
 
     boolean isEnabledForNativeBackend(String fileName) {
@@ -608,7 +614,16 @@ fun runTest() {
             compileList.add(project.file("testUtils.kt").absolutePath)
             compileList.add(project.file("helpers.kt").absolutePath)
             try {
-                runCompiler(compileList, buildExePath(), flags)
+                def exePath = buildExePath()
+                if (enableTwoStageCompilation) {
+                    // Two-stage compilation.
+                    def klibPath = "${exePath}.klib"
+                    runCompiler(compileList, klibPath, flags + ["-p", "library"])
+                    runCompiler([], exePath, flags + ["-Xinclude=$klibPath"])
+                } else {
+                    // Regular compilation.
+                    runCompiler(compileList, exePath, flags)
+                }
             } catch (Exception ex) {
                 project.logger.quiet("ERROR: Compilation failed for test suite: $name with exception", ex)
                 project.logger.quiet("The following files were unable to compile:")

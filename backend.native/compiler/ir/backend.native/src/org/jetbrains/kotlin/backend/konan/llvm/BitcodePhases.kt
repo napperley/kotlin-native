@@ -7,6 +7,7 @@ package org.jetbrains.kotlin.backend.konan.llvm
 
 import llvm.*
 import org.jetbrains.kotlin.backend.konan.*
+import org.jetbrains.kotlin.backend.konan.descriptors.GlobalHierarchyAnalysis
 import org.jetbrains.kotlin.backend.konan.optimizations.*
 import org.jetbrains.kotlin.descriptors.ClassKind
 import org.jetbrains.kotlin.ir.IrElement
@@ -25,13 +26,28 @@ internal val contextLLVMSetupPhase = makeKonanModuleOpPhase(
             // (see Llvm class in ContextUtils)
             // Which in turn is determined by the clang flags
             // used to compile runtime.bc.
-            val llvmModule = LLVMModuleCreateWithName("out")!! // TODO: dispose
+            llvmContext = LLVMContextCreate()!!
+            val llvmModule = LLVMModuleCreateWithNameInContext("out", llvmContext)!!
             context.llvmModule = llvmModule
-            context.debugInfo.builder = DICreateBuilder(llvmModule)
+            context.debugInfo.builder = LLVMCreateDIBuilder(llvmModule)
+        }
+)
+
+internal val createLLVMDeclarationsPhase = makeKonanModuleOpPhase(
+        name = "CreateLLVMDeclarations",
+        description = "Map IR declarations to LLVM",
+        prerequisite = setOf(contextLLVMSetupPhase),
+        op = { context, _ ->
             context.llvmDeclarations = createLlvmDeclarations(context)
             context.lifetimes = mutableMapOf()
             context.codegenVisitor = CodeGeneratorVisitor(context, context.lifetimes)
         }
+)
+
+internal val disposeLLVMPhase = makeKonanModuleOpPhase(
+        name = "DisposeLLVM",
+        description = "Dispose LLVM",
+        op = { context, _ -> context.disposeLlvm() }
 )
 
 internal val RTTIPhase = makeKonanModuleOpPhase(
@@ -75,6 +91,12 @@ internal val devirtualizationPhase = makeKonanModuleOpPhase(
                     irModule, context, context.moduleDFG!!, ExternalModulesDFG(emptyList(), emptyMap(), emptyMap(), emptyMap())
             )
         }
+)
+
+internal val ghaPhase = makeKonanModuleOpPhase(
+        name = "GHAPhase",
+        description = "Global hierarchy analysis",
+        op = { context, irModule -> GlobalHierarchyAnalysis(context, irModule).run() }
 )
 
 internal val IrFunction.longName: String

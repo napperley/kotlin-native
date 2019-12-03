@@ -7,10 +7,7 @@ package org.jetbrains.kotlin
 
 import org.gradle.api.Project
 import org.gradle.api.Task
-import org.jetbrains.kotlin.konan.target.AppleConfigurables
-import org.jetbrains.kotlin.konan.target.HostManager
-import org.jetbrains.kotlin.konan.target.KonanTarget
-import org.jetbrains.kotlin.konan.target.PlatformManager
+import org.jetbrains.kotlin.konan.target.*
 import java.io.FileInputStream
 import java.io.IOException
 import java.io.File
@@ -41,6 +38,10 @@ val Project.testOutputStdlib
 val Project.testOutputFramework
     get() = (findProperty("testOutputFramework") as File).toString()
 
+val Project.kotlinNativeDist
+    get() = this.rootProject.file(this.findProperty("org.jetbrains.kotlin.native.home")
+            ?: this.findProperty("konan.home") ?: "dist")
+
 @Suppress("UNCHECKED_CAST")
 val Project.globalTestArgs: List<String>
     get() = with(findProperty("globalTestArgs")) {
@@ -53,6 +54,9 @@ val Project.globalTestArgs: List<String>
 
 fun Project.platformManager() = findProperty("platformManager") as PlatformManager
 fun Project.testTarget() = findProperty("target") as KonanTarget
+
+fun Project.testTargetSupportsCodeCoverage(): Boolean =
+        this.testTarget.supportsCodeCoverage()
 
 /**
  * Ad-hoc signing of the specified path.
@@ -135,7 +139,7 @@ fun Array<String>.runCommand(workingDir: File = File("."),
                 .start().apply {
                     waitFor(timeoutAmount, timeoutUnit)
                 }.inputStream.bufferedReader().readText()
-    } catch (e: IOException) {
+    } catch (e: Exception) {
         error("Couldn't run command $this")
     }
 }
@@ -215,7 +219,11 @@ fun compileSwift(project: Project, target: KonanTarget, sources: List<String>, o
     val swiftTarget = when (target) {
         KonanTarget.IOS_X64   -> "x86_64-apple-ios" + configs.osVersionMin
         KonanTarget.IOS_ARM64 -> "arm64_64-apple-ios" + configs.osVersionMin
+        KonanTarget.TVOS_X64   -> "x86_64-apple-tvos" + configs.osVersionMin
+        KonanTarget.TVOS_ARM64 -> "arm64_64-apple-tvos" + configs.osVersionMin
         KonanTarget.MACOS_X64 -> "x86_64-apple-macosx" + configs.osVersionMin
+        KonanTarget.WATCHOS_X86 -> "i386-apple-watchos" + configs.osVersionMin
+        KonanTarget.WATCHOS_X64 -> "x86_64-apple-watchos" + configs.osVersionMin
         else -> throw IllegalStateException("Test target $target is not supported")
     }
 

@@ -7,7 +7,6 @@ package org.jetbrains.kotlin.backend.konan.lower
 
 import org.jetbrains.kotlin.backend.common.FileLoweringPass
 import org.jetbrains.kotlin.backend.common.IrElementTransformerVoidWithContext
-import org.jetbrains.kotlin.backend.common.descriptors.*
 import org.jetbrains.kotlin.backend.common.ir.*
 import org.jetbrains.kotlin.backend.common.lower.*
 import org.jetbrains.kotlin.backend.konan.Context
@@ -23,6 +22,9 @@ import org.jetbrains.kotlin.ir.declarations.*
 import org.jetbrains.kotlin.ir.declarations.impl.IrClassImpl
 import org.jetbrains.kotlin.ir.declarations.impl.IrConstructorImpl
 import org.jetbrains.kotlin.ir.declarations.impl.IrFunctionImpl
+import org.jetbrains.kotlin.ir.descriptors.WrappedClassConstructorDescriptor
+import org.jetbrains.kotlin.ir.descriptors.WrappedClassDescriptor
+import org.jetbrains.kotlin.ir.descriptors.WrappedSimpleFunctionDescriptor
 import org.jetbrains.kotlin.ir.expressions.*
 import org.jetbrains.kotlin.ir.expressions.impl.IrInstanceInitializerCallImpl
 import org.jetbrains.kotlin.ir.symbols.IrClassSymbol
@@ -162,7 +164,8 @@ internal class CallableReferenceLowering(val context: Context): FileLoweringPass
                     isInner = false,
                     isData = false,
                     isExternal = false,
-                    isInline = false
+                    isInline = false,
+                    isExpect = false
             ).apply {
                 it.bind(this)
                 parent = this@FunctionReferenceBuilder.parent
@@ -252,7 +255,8 @@ internal class CallableReferenceLowering(val context: Context): FileLoweringPass
                     functionReferenceClass.defaultType,
                     isInline = false,
                     isExternal = false,
-                    isPrimary = true
+                    isPrimary = true,
+                    isExpect = false
             ).apply {
                 it.bind(this)
                 parent = functionReferenceClass
@@ -306,7 +310,10 @@ internal class CallableReferenceLowering(val context: Context): FileLoweringPass
                     isInline = false,
                     isExternal = false,
                     isTailrec = false,
-                    isSuspend = superFunction.isSuspend
+                    isSuspend = superFunction.isSuspend,
+                    isExpect = false,
+                    isFakeOverride = false,
+                    isOperator = false
             ).apply {
                 it.bind(this)
                 val function = this

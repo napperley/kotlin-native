@@ -12,18 +12,21 @@ import org.jetbrains.kotlin.backend.konan.descriptors.*
 import org.jetbrains.kotlin.backend.konan.ir.allParameters
 import org.jetbrains.kotlin.backend.konan.ir.isOverridable
 import org.jetbrains.kotlin.backend.konan.ir.isUnit
+import org.jetbrains.kotlin.backend.konan.ir.llvmSymbolOrigin
 import org.jetbrains.kotlin.backend.konan.llvm.*
 import org.jetbrains.kotlin.backend.konan.llvm.objc.ObjCCodeGenerator
 import org.jetbrains.kotlin.backend.konan.llvm.objc.ObjCDataGenerator
 import org.jetbrains.kotlin.backend.konan.objcexport.*
+import org.jetbrains.kotlin.backend.konan.serialization.resolveFakeOverrideMaybeAbstract
 import org.jetbrains.kotlin.descriptors.*
-import org.jetbrains.kotlin.descriptors.konan.CurrentKonanModuleOrigin
+import org.jetbrains.kotlin.descriptors.konan.CompiledKlibModuleOrigin
+import org.jetbrains.kotlin.descriptors.konan.CurrentKlibModuleOrigin
 import org.jetbrains.kotlin.ir.declarations.*
 import org.jetbrains.kotlin.ir.symbols.IrClassSymbol
 import org.jetbrains.kotlin.ir.types.*
-import org.jetbrains.kotlin.ir.util.constructedClass
-import org.jetbrains.kotlin.ir.util.isInterface
-import org.jetbrains.kotlin.ir.util.parentAsClass
+import org.jetbrains.kotlin.ir.util.*
+import org.jetbrains.kotlin.konan.target.Family
+import org.jetbrains.kotlin.konan.target.KonanTarget
 import org.jetbrains.kotlin.name.Name
 
 internal fun TypeBridge.makeNothing() = when (this) {
@@ -31,14 +34,8 @@ internal fun TypeBridge.makeNothing() = when (this) {
     is ValueTypeBridge -> LLVMConstNull(this.objCValueType.llvmType)!!
 }
 
-internal class ObjCExportCodeGenerator(
-        codegen: CodeGenerator,
-        val namer: ObjCExportNamer,
-        val mapper: ObjCExportMapper
-) : ObjCCodeGenerator(codegen) {
-
+internal open class ObjCExportCodeGeneratorBase(codegen: CodeGenerator) : ObjCCodeGenerator(codegen) {
     val symbols get() = context.ir.symbols
-
     val runtime get() = codegen.runtime
     val staticData get() = codegen.staticData
 
@@ -48,13 +45,11 @@ internal class ObjCExportCodeGenerator(
         context.llvm.externalFunction(
                 "objc_terminate",
                 functionType(voidType, false),
-                CurrentKonanModuleOrigin
+                CurrentKlibModuleOrigin
         ).also {
             setFunctionNoUnwind(it)
         }
     }
-
-    val referencedSelectors = mutableMapOf<String, MethodBridge>()
 
     // TODO: currently bridges don't have any custom `landingpad`s,
     // so it is correct to use [callAtFunctionScope] here.
@@ -71,6 +66,55 @@ internal class ObjCExportCodeGenerator(
 
         return call(function, args, resultLifetime, ExceptionHandler.Caller)
     }
+
+    fun FunctionGenerationContext.kotlinReferenceToObjC(value: LLVMValueRef) =
+            callFromBridge(context.llvm.Kotlin_ObjCExport_refToObjC, listOf(value))
+
+    fun FunctionGenerationContext.objCReferenceToKotlin(value: LLVMValueRef, resultLifetime: Lifetime) =
+            callFromBridge(context.llvm.Kotlin_ObjCExport_refFromObjC, listOf(value), resultLifetime)
+
+    private val blockToKotlinFunctionConverterCache = mutableMapOf<BlockPointerBridge, LLVMValueRef>()
+
+    internal fun blockToKotlinFunctionConverter(bridge: BlockPointerBridge): LLVMValueRef =
+            blockToKotlinFunctionConverterCache.getOrPut(bridge) {
+                generateBlockToKotlinFunctionConverter(bridge)
+            }
+
+    private val blockAdapterToFunctionGenerator = BlockAdapterToFunctionGenerator(this.codegen)
+    private val functionToBlockConverterCache = mutableMapOf<BlockPointerBridge, LLVMValueRef>()
+
+    internal fun kotlinFunctionToBlockConverter(bridge: BlockPointerBridge): LLVMValueRef =
+            functionToBlockConverterCache.getOrPut(bridge) {
+                blockAdapterToFunctionGenerator.run {
+                    generateConvertFunctionToBlock(bridge)
+                }
+            }
+}
+
+internal class ObjCExportBlockCodeGenerator(codegen: CodeGenerator) : ObjCExportCodeGeneratorBase(codegen) {
+    init {
+        // Must be generated along with stdlib:
+        // 1. Enumerates [BuiltInFictitiousFunctionIrClassFactory] built classes, which may be incomplete otherwise.
+        // 2. Modifies stdlib global initializers.
+        // 3. Defines runtime-declared globals.
+        require(context.producedLlvmModuleContainsStdlib)
+    }
+
+    fun generate() {
+        emitFunctionConverters()
+        emitBlockToKotlinFunctionConverters()
+    }
+}
+
+internal class ObjCExportCodeGenerator(
+        codegen: CodeGenerator,
+        val namer: ObjCExportNamer,
+        val mapper: ObjCExportMapper
+) : ObjCExportCodeGeneratorBase(codegen) {
+
+    val referencedSelectors = mutableMapOf<String, MethodBridge>()
+
+    val externalGlobalInitializers = mutableMapOf<LLVMValueRef, ConstValue>()
 
     fun FunctionGenerationContext.genSendMessage(
             returnType: LLVMTypeRef,
@@ -114,12 +158,6 @@ internal class ObjCExportCodeGenerator(
         ObjCValueType.FLOAT, ObjCValueType.DOUBLE, ObjCValueType.POINTER -> value
     }
 
-    fun FunctionGenerationContext.kotlinReferenceToObjC(value: LLVMValueRef) =
-            callFromBridge(context.llvm.Kotlin_ObjCExport_refToObjC, listOf(value))
-
-    fun FunctionGenerationContext.objCReferenceToKotlin(value: LLVMValueRef, resultLifetime: Lifetime) =
-            callFromBridge(context.llvm.Kotlin_ObjCExport_refFromObjC, listOf(value), resultLifetime)
-
     private fun FunctionGenerationContext.objCBlockPointerToKotlin(
             value: LLVMValueRef,
             typeBridge: BlockPointerBridge,
@@ -130,28 +168,10 @@ internal class ObjCExportCodeGenerator(
             resultLifetime
     )
 
-    private val blockToKotlinFunctionConverterCache = mutableMapOf<BlockPointerBridge, LLVMValueRef>()
-
-    internal fun blockToKotlinFunctionConverter(bridge: BlockPointerBridge): LLVMValueRef =
-            blockToKotlinFunctionConverterCache.getOrPut(bridge) {
-                generateBlockToKotlinFunctionConverter(bridge)
-            }
-
     private fun FunctionGenerationContext.kotlinFunctionToObjCBlockPointer(
             typeBridge: BlockPointerBridge,
             value: LLVMValueRef
     ) = callFromBridge(kotlinFunctionToBlockConverter(typeBridge), listOf(value))
-
-    private val blockAdapterToFunctionGenerator = BlockAdapterToFunctionGenerator(this)
-
-    private val functionToBlockConverterCache = mutableMapOf<BlockPointerBridge, LLVMValueRef>()
-
-    internal fun kotlinFunctionToBlockConverter(bridge: BlockPointerBridge): LLVMValueRef =
-            functionToBlockConverterCache.getOrPut(bridge) {
-                blockAdapterToFunctionGenerator.run {
-                    generateConvertFunctionToBlock(bridge)
-                }
-            }
 
     fun FunctionGenerationContext.kotlinToObjC(
             value: LLVMValueRef,
@@ -222,15 +242,30 @@ internal class ObjCExportCodeGenerator(
 
     internal fun emitRtti() {
         NSNumberKind.values().mapNotNull { it.mappedKotlinClassId }.forEach {
-            dataGenerator.exportClass("Kotlin${it.shortClassName}")
+            dataGenerator.exportClass(namer.numberBoxName(it).binaryName)
         }
-        dataGenerator.exportClass("KotlinMutableSet")
-        dataGenerator.exportClass("KotlinMutableDictionary")
+        dataGenerator.exportClass(namer.mutableSetName.binaryName)
+        dataGenerator.exportClass(namer.mutableMapName.binaryName)
 
         emitSpecialClassesConvertions()
 
         objCTypeAdapters += createTypeAdapter(objCClassForAny, superClass = null)
 
+        emitTypeAdapters()
+
+        // Replace runtime global with weak linkage:
+        replaceExternalWeakOrCommonGlobal(
+                "Kotlin_ObjCInterop_uniquePrefix",
+                codegen.staticData.cStringLiteral(namer.topLevelNamePrefix),
+                context.standardLlvmSymbolsOrigin
+        )
+
+        emitSelectorsHolder()
+
+        emitStaticInitializers()
+    }
+
+    private fun emitTypeAdapters() {
         val placedClassAdapters = mutableMapOf<String, ConstPointer>()
         val placedInterfaceAdapters = mutableMapOf<String, ConstPointer>()
 
@@ -247,7 +282,12 @@ internal class ObjCExportCodeGenerator(
             descriptorToAdapter[adapter.objCName] = typeAdapter
 
             if (irClass != null) {
-                setObjCExportTypeInfo(irClass, typeAdapter = typeAdapter)
+                if (!context.llvmModuleSpecification.importsKotlinDeclarationsFromOtherSharedLibraries()) {
+                    setObjCExportTypeInfo(irClass, typeAdapter = typeAdapter)
+                } else {
+                    // Optimization: avoid generating huge initializers;
+                    // handled with "Kotlin_ObjCExport_initTypeAdapters" below.
+                }
             }
         }
 
@@ -261,14 +301,37 @@ internal class ObjCExportCodeGenerator(
                 val sortedAdaptersPointer = staticData.placeGlobalConstArray("", type, sortedAdapters)
 
                 // Note: this globals replace runtime globals with weak linkage:
-                staticData.placeGlobal(prefix, sortedAdaptersPointer, isExported = true)
-                staticData.placeGlobal("${prefix}Num", Int32(sortedAdapters.size), isExported = true)
+                val origin = context.standardLlvmSymbolsOrigin
+                replaceExternalWeakOrCommonGlobal(prefix, sortedAdaptersPointer, origin)
+                replaceExternalWeakOrCommonGlobal("${prefix}Num", Int32(sortedAdapters.size), origin)
             }
         }
 
         emitSortedAdapters(placedClassAdapters, "Kotlin_ObjCExport_sortedClassAdapters")
         emitSortedAdapters(placedInterfaceAdapters, "Kotlin_ObjCExport_sortedProtocolAdapters")
-        emitSelectorsHolder()
+
+        if (context.llvmModuleSpecification.importsKotlinDeclarationsFromOtherSharedLibraries()) {
+            replaceExternalWeakOrCommonGlobal(
+                    "Kotlin_ObjCExport_initTypeAdapters",
+                    Int1(1),
+                    context.standardLlvmSymbolsOrigin
+            )
+        }
+    }
+
+    private fun emitStaticInitializers() {
+        if (externalGlobalInitializers.isEmpty()) return
+
+        val initializer = generateFunction(codegen, functionType(voidType, false), "initObjCExportGlobals") {
+            externalGlobalInitializers.forEach { (global, value) ->
+                store(value.llvm, global)
+            }
+            ret(null)
+        }
+
+        LLVMSetLinkage(initializer, LLVMLinkage.LLVMInternalLinkage)
+
+        context.llvm.otherStaticInitializers += initializer
     }
 
     // TODO: consider including this into ObjCExportCodeSpec.
@@ -295,7 +358,11 @@ internal class ObjCExportCodeGenerator(
             ObjCDataGenerator.Method(selector, getEncoding(bridge), constPointer(imp))
         }
 
-        dataGenerator.emitClass("KotlinSelectorsHolder", "NSObject", instanceMethods = methods)
+        dataGenerator.emitClass(
+                "${namer.topLevelNamePrefix}KotlinSelectorsHolder",
+                superName = "NSObject",
+                instanceMethods = methods
+        )
     }
 
     private val impType = pointerType(functionType(int8TypePtr, true, int8TypePtr, int8TypePtr))
@@ -316,12 +383,15 @@ internal class ObjCExportCodeGenerator(
     inner class KotlinToObjCMethodAdapter(
             selector: String,
             nameSignature: Long,
+            itablePlace: ClassLayoutBuilder.InterfaceTablePlace,
             vtableIndex: Int,
             kotlinImpl: ConstPointer
     ) : Struct(
             runtime.kotlinToObjCMethodAdapter,
             staticData.cStringLiteral(selector),
             Int64(nameSignature),
+            Int32(itablePlace.interfaceId),
+            Int32(itablePlace.methodIndex),
             Int32(vtableIndex),
             kotlinImpl
     )
@@ -332,6 +402,8 @@ internal class ObjCExportCodeGenerator(
             vtable: ConstPointer?,
             vtableSize: Int,
             methodTable: List<RTTIGenerator.MethodTableRecord>,
+            itable: List<RTTIGenerator.InterfaceTableRecord>,
+            itableSize: Int,
             val objCName: String,
             directAdapters: List<ObjCToKotlinMethodAdapter>,
             classAdapters: List<ObjCToKotlinMethodAdapter>,
@@ -346,6 +418,9 @@ internal class ObjCExportCodeGenerator(
 
             staticData.placeGlobalConstArray("", runtime.methodTableRecordType, methodTable),
             Int32(methodTable.size),
+
+            staticData.placeGlobalConstArray("", runtime.interfaceTableRecordType, itable),
+            Int32(itableSize),
 
             staticData.cStringLiteral(objCName),
 
@@ -380,12 +455,62 @@ internal class ObjCExportCodeGenerator(
 
 }
 
+private fun ObjCExportCodeGenerator.replaceExternalWeakOrCommonGlobal(
+        name: String,
+        value: ConstValue,
+        origin: CompiledKlibModuleOrigin
+) {
+    if (context.llvmModuleSpecification.importsKotlinDeclarationsFromOtherSharedLibraries()) {
+        val global = codegen.importGlobal(name, value.llvmType, origin)
+        externalGlobalInitializers[global] = value
+    } else {
+        context.llvmImports.add(origin)
+        val global = staticData.placeGlobal(name, value, isExported = true)
+
+        if (context.llvmModuleSpecification.importsKotlinDeclarationsFromOtherObjectFiles()) {
+            // Note: actually this is required only if global's weak/common definition is in another object file,
+            // but it is simpler to do this for all globals, considering that all usages can't be removed by DCE anyway.
+            context.llvm.usedGlobals += global.llvmGlobal
+        }
+    }
+}
+
 private fun ObjCExportCodeGenerator.setObjCExportTypeInfo(
         irClass: IrClass,
         converter: ConstPointer? = null,
         objCClass: ConstPointer? = null,
         typeAdapter: ConstPointer? = null
 ) {
+    val writableTypeInfoValue = buildWritableTypeInfoValue(
+            converter = converter,
+            objCClass = objCClass,
+            typeAdapter = typeAdapter
+    )
+
+    if (codegen.isExternal(irClass)) {
+        // Note: this global replaces the external one with common linkage.
+        replaceExternalWeakOrCommonGlobal(
+                irClass.writableTypeInfoSymbolName,
+                writableTypeInfoValue,
+                irClass.llvmSymbolOrigin
+        )
+    } else {
+        setOwnWritableTypeInfo(irClass, writableTypeInfoValue)
+    }
+}
+
+private fun ObjCExportCodeGeneratorBase.setOwnWritableTypeInfo(irClass: IrClass, writableTypeInfoValue: Struct) {
+    require(!codegen.isExternal(irClass))
+    val writeableTypeInfoGlobal = context.llvmDeclarations.forClass(irClass).writableTypeInfoGlobal!!
+    writeableTypeInfoGlobal.setLinkage(LLVMLinkage.LLVMExternalLinkage)
+    writeableTypeInfoGlobal.setInitializer(writableTypeInfoValue)
+}
+
+private fun ObjCExportCodeGeneratorBase.buildWritableTypeInfoValue(
+        converter: ConstPointer? = null,
+        objCClass: ConstPointer? = null,
+        typeAdapter: ConstPointer? = null
+): Struct {
     if (converter != null) {
         assert(converter.llvmType == pointerType(functionType(int8TypePtr, false, codegen.kObjHeaderPtr)))
     }
@@ -397,26 +522,14 @@ private fun ObjCExportCodeGenerator.setObjCExportTypeInfo(
     )
 
     val writableTypeInfoType = runtime.writableTypeInfoType!!
-    val writableTypeInfoValue = Struct(writableTypeInfoType, objCExportAddition)
-
-    val global = if (codegen.isExternal(irClass)) {
-        // Note: this global replaces the external one with common linkage.
-        staticData.createGlobal(
-                writableTypeInfoType,
-                irClass.writableTypeInfoSymbolName,
-                isExported = true
-        )
-    } else {
-        context.llvmDeclarations.forClass(irClass).writableTypeInfoGlobal!!.also {
-            it.setLinkage(LLVMLinkage.LLVMExternalLinkage)
-        }
-    }
-
-    global.setInitializer(writableTypeInfoValue)
+    return Struct(writableTypeInfoType, objCExportAddition)
 }
 
 private val ObjCExportCodeGenerator.kotlinToObjCFunctionType: LLVMTypeRef
     get() = functionType(int8TypePtr, false, codegen.kObjHeaderPtr)
+
+private val ObjCExportCodeGeneratorBase.objCToKotlinFunctionType: LLVMTypeRef
+    get() = functionType(codegen.kObjHeaderPtr, false, int8TypePtr, codegen.kObjHeaderPtrPtr)
 
 private fun ObjCExportCodeGenerator.emitBoxConverters() {
     val irBuiltIns = context.irBuiltIns
@@ -452,7 +565,7 @@ private fun ObjCExportCodeGenerator.emitBoxConverter(
 
         val value = kotlinToObjC(kotlinValue, objCValueType)
 
-        val nsNumberSubclass = genGetLinkedClass("Kotlin${boxClass.name}")
+        val nsNumberSubclass = genGetLinkedClass(namer.numberBoxName(boxClass.classId!!).binaryName)
         ret(genSendMessage(int8TypePtr, nsNumberSubclass, nsNumberFactorySelector, value))
     }
 
@@ -460,26 +573,42 @@ private fun ObjCExportCodeGenerator.emitBoxConverter(
     setObjCExportTypeInfo(boxClass, constPointer(converter))
 }
 
-private fun ObjCExportCodeGenerator.emitFunctionConverters() {
+private fun ObjCExportBlockCodeGenerator.emitFunctionConverters() {
+    require(context.producedLlvmModuleContainsStdlib)
     context.ir.symbols.functionIrClassFactory.builtFunctionNClasses.forEach { functionClass ->
         val converter = kotlinFunctionToBlockConverter(BlockPointerBridge(functionClass.arity, returnsVoid = false))
-        setObjCExportTypeInfo(functionClass.irClass, constPointer(converter))
+
+        val writableTypeInfoValue = buildWritableTypeInfoValue(converter = constPointer(converter))
+        setOwnWritableTypeInfo(functionClass.irClass, writableTypeInfoValue)
     }
 }
 
-private fun ObjCExportCodeGenerator.emitBlockToKotlinFunctionConverters() {
-    val converters = context.ir.symbols.functionIrClassFactory.builtFunctionNClasses.map {
-        val bridge = BlockPointerBridge(numberOfParameters = it.arity, returnsVoid = false)
-        constPointer(blockToKotlinFunctionConverter(bridge))
+private fun ObjCExportBlockCodeGenerator.emitBlockToKotlinFunctionConverters() {
+    require(context.producedLlvmModuleContainsStdlib)
+    val functionClassesByArity =
+            context.ir.symbols.functionIrClassFactory.builtFunctionNClasses.associateBy { it.arity }
+
+    val count = (functionClassesByArity.keys.max() ?: -1) + 1
+
+    val converters = (0 until count).map { arity ->
+        val functionClass = functionClassesByArity[arity]
+        if (functionClass != null) {
+            val bridge = BlockPointerBridge(numberOfParameters = functionClass.arity, returnsVoid = false)
+            constPointer(blockToKotlinFunctionConverter(bridge))
+        } else {
+            NullPointer(objCToKotlinFunctionType)
+        }
     }
+
     val ptr = staticData.placeGlobalArray(
             "",
-            converters.first().llvmType,
+            pointerType(objCToKotlinFunctionType),
             converters
     ).pointer.getElementPtr(0)
 
-    // Note: this global replaces the weak global defined in runtime.
+    // Note: defining globals declared in runtime.
     staticData.placeGlobal("Kotlin_ObjCExport_blockToFunctionConverters", ptr, isExported = true)
+    staticData.placeGlobal("Kotlin_ObjCExport_blockToFunctionConverters_size", Int32(count), isExported = true)
 }
 
 private fun ObjCExportCodeGenerator.emitSpecialClassesConvertions() {
@@ -488,48 +617,55 @@ private fun ObjCExportCodeGenerator.emitSpecialClassesConvertions() {
             constPointer(context.llvm.Kotlin_ObjCExport_CreateNSStringFromKString)
     )
 
+    emitCollectionConverters()
+
+    emitBoxConverters()
+}
+
+private fun ObjCExportCodeGenerator.emitCollectionConverters() {
+
+    fun importConverter(name: String): ConstPointer = constPointer(context.llvm.externalFunction(
+            name,
+            kotlinToObjCFunctionType,
+            CurrentKlibModuleOrigin
+    ))
+
     setObjCExportTypeInfo(
             symbols.list.owner,
-            constPointer(context.llvm.Kotlin_Interop_CreateNSArrayFromKList)
+            importConverter("Kotlin_Interop_CreateNSArrayFromKList")
     )
 
     setObjCExportTypeInfo(
             symbols.mutableList.owner,
-            constPointer(context.llvm.Kotlin_Interop_CreateNSMutableArrayFromKList)
+            importConverter("Kotlin_Interop_CreateNSMutableArrayFromKList")
     )
 
     setObjCExportTypeInfo(
             symbols.set.owner,
-            constPointer(context.llvm.Kotlin_Interop_CreateNSSetFromKSet)
+            importConverter("Kotlin_Interop_CreateNSSetFromKSet")
     )
 
     setObjCExportTypeInfo(
             symbols.mutableSet.owner,
-            constPointer(context.llvm.Kotlin_Interop_CreateKotlinMutableSetFromKSet)
+            importConverter("Kotlin_Interop_CreateKotlinMutableSetFromKSet")
     )
 
     setObjCExportTypeInfo(
             symbols.map.owner,
-            constPointer(context.llvm.Kotlin_Interop_CreateNSDictionaryFromKMap)
+            importConverter("Kotlin_Interop_CreateNSDictionaryFromKMap")
     )
 
     setObjCExportTypeInfo(
             symbols.mutableMap.owner,
-            constPointer(context.llvm.Kotlin_Interop_CreateKotlinMutableDictonaryFromKMap)
+            importConverter("Kotlin_Interop_CreateKotlinMutableDictonaryFromKMap")
     )
-
-    emitBoxConverters()
-
-    emitFunctionConverters()
-
-    emitBlockToKotlinFunctionConverters()
 }
 
 private inline fun ObjCExportCodeGenerator.generateObjCImpBy(
         methodBridge: MethodBridge,
         genBody: FunctionGenerationContext.() -> Unit
 ): LLVMValueRef {
-    val result = LLVMAddFunction(context.llvmModule, "", objCFunctionType(context, methodBridge))!!
+    val result = LLVMAddFunction(context.llvmModule, "objc2kotlin", objCFunctionType(context, methodBridge))!!
 
     generateFunction(codegen, result) {
         genBody()
@@ -666,7 +802,7 @@ private fun ObjCExportCodeGenerator.generateObjCImp(
         MethodBridge.ReturnValue.Void -> null
         MethodBridge.ReturnValue.HashCode -> {
             val kotlinHashCode = targetResult!!
-            if (codegen.context.is64Bit()) zext(kotlinHashCode, int64Type) else kotlinHashCode
+            if (codegen.context.is64BitNSInteger()) zext(kotlinHashCode, int64Type) else kotlinHashCode
         }
         is MethodBridge.ReturnValue.Mapped -> kotlinToObjC(targetResult!!, returnBridge.bridge)
         MethodBridge.ReturnValue.WithError.Success -> Int8(1).llvm // true
@@ -707,7 +843,7 @@ private fun ObjCExportCodeGenerator.generateKotlinToObjCBridge(
 
     val functionType = codegen.getLlvmFunctionType(irFunction)
 
-    val result = generateFunction(codegen, functionType, "") {
+    val result = generateFunction(codegen, functionType, "kotlin2objc") {
         var errorOutPtr: LLVMValueRef? = null
         var kotlinResultOutPtr: LLVMValueRef? = null
         lateinit var kotlinResultOutBridge: TypeBridge
@@ -768,7 +904,7 @@ private fun ObjCExportCodeGenerator.generateKotlinToObjCBridge(
             MethodBridge.ReturnValue.Void -> null
 
             MethodBridge.ReturnValue.HashCode -> {
-                if (codegen.context.is64Bit()) {
+                if (codegen.context.is64BitNSInteger()) {
                     val low = trunc(targetResult, int32Type)
                     val high = trunc(shr(targetResult, 32, signed = false), int32Type)
                     xor(low, high)
@@ -837,7 +973,8 @@ private fun ObjCExportCodeGenerator.createReverseAdapter(
         irFunction: IrFunction,
         baseMethod: IrFunction,
         functionName: String,
-        vtableIndex: Int?
+        vtableIndex: Int?,
+        itablePlace: ClassLayoutBuilder.InterfaceTablePlace?
 ): ObjCExportCodeGenerator.KotlinToObjCMethodAdapter {
 
     val nameSignature = functionName.localHash.value
@@ -848,7 +985,10 @@ private fun ObjCExportCodeGenerator.createReverseAdapter(
             baseMethod
     ).bitcast(int8TypePtr)
 
-    return KotlinToObjCMethodAdapter(selector, nameSignature, vtableIndex ?: -1, kotlinToObjC)
+    return KotlinToObjCMethodAdapter(selector, nameSignature,
+            itablePlace ?: ClassLayoutBuilder.InterfaceTablePlace.INVALID,
+            vtableIndex ?: -1,
+            kotlinToObjC)
 }
 
 private fun ObjCExportCodeGenerator.createMethodVirtualAdapter(
@@ -912,6 +1052,17 @@ private fun ObjCExportCodeGenerator.vtableIndex(irFunction: IrSimpleFunction): I
     }
 }
 
+private fun ObjCExportCodeGenerator.itablePlace(irFunction: IrSimpleFunction): ClassLayoutBuilder.InterfaceTablePlace? {
+    assert(irFunction.isOverridable)
+    val irClass = irFunction.parentAsClass
+    return if (irClass.isInterface && context.ghaEnabled()
+            && (irFunction.isReal || irFunction.resolveFakeOverrideMaybeAbstract().parent != context.irBuiltIns.anyClass.owner)) {
+        context.getLayoutBuilder(irClass).itablePlace(irFunction)
+    } else {
+        null
+    }
+}
+
 private fun ObjCExportCodeGenerator.createTypeAdapterForFileClass(
         fileClass: ObjCClassForKotlinFile
 ): ObjCExportCodeGenerator.ObjCTypeAdapter {
@@ -925,6 +1076,8 @@ private fun ObjCExportCodeGenerator.createTypeAdapterForFileClass(
             vtable = null,
             vtableSize = -1,
             methodTable = emptyList(),
+            itable = emptyList(),
+            itableSize = -1,
             objCName = name,
             directAdapters = emptyList(),
             classAdapters = adapters,
@@ -998,6 +1151,12 @@ private fun ObjCExportCodeGenerator.createTypeAdapter(
         emptyList()
     }
 
+    val (itable, itableSize) = when {
+        irClass.isInterface -> Pair(emptyList(), context.getLayoutBuilder(irClass).interfaceTableEntries.size)
+        irClass.isAbstract() && context.ghaEnabled() -> rttiGenerator.interfaceTableRecords(irClass)
+        else -> Pair(emptyList(), -1)
+    }
+
     when (irClass.kind) {
         ClassKind.OBJECT -> {
             classAdapters += if (irClass.isUnit()) {
@@ -1017,6 +1176,8 @@ private fun ObjCExportCodeGenerator.createTypeAdapter(
             vtable,
             vtableSize,
             methodTable,
+            itable,
+            itableSize,
             objCName,
             adapters,
             classAdapters,
@@ -1042,6 +1203,7 @@ private fun ObjCExportCodeGenerator.createReverseAdapters(
 
             val presentVtableBridges = mutableSetOf<Int?>(null)
             val presentMethodTableBridges = mutableSetOf<String>()
+            val presentItableBridges = mutableSetOf<ClassLayoutBuilder.InterfaceTablePlace?>(null)
 
             val allOverriddenMethods = method.allOverriddenFunctions
 
@@ -1052,16 +1214,20 @@ private fun ObjCExportCodeGenerator.createReverseAdapters(
             inherited.forEach {
                 presentVtableBridges += vtableIndex(it)
                 presentMethodTableBridges += it.functionName
+                presentItableBridges += itablePlace(it)
             }
 
             uninherited.forEach {
                 val vtableIndex = vtableIndex(it)
                 val functionName = it.functionName
+                val itablePlace = itablePlace(it)
 
-                if (vtableIndex !in presentVtableBridges || functionName !in presentMethodTableBridges) {
+                if (vtableIndex !in presentVtableBridges || functionName !in presentMethodTableBridges
+                        || itablePlace !in presentItableBridges) {
                     presentVtableBridges += vtableIndex
                     presentMethodTableBridges += functionName
-                    result += createReverseAdapter(it, baseMethod, functionName, vtableIndex)
+                    presentItableBridges += itablePlace
+                    result += createReverseAdapter(it, baseMethod, functionName, vtableIndex, itablePlace)
                 }
             }
 
@@ -1083,7 +1249,8 @@ private fun ObjCExportCodeGenerator.nonOverridableAdapter(
     namer.getSelector(baseMethod),
     -1,
     vtableIndex = if (hasSelectorAmbiguity) -2 else -1, // Describes the reason.
-    kotlinImpl = NullPointer(int8Type)
+    kotlinImpl = NullPointer(int8Type),
+    itablePlace = ClassLayoutBuilder.InterfaceTablePlace.INVALID
 )
 
 private val ObjCTypeForKotlinType.kotlinMethods: List<ObjCMethodForKotlinMethod>
@@ -1127,7 +1294,7 @@ private inline fun ObjCExportCodeGenerator.generateObjCToKotlinSyntheticGetter(
     )
 
     val encoding = getEncoding(methodBridge)
-    val imp = generateFunction(codegen, objCFunctionType(context, methodBridge), "") {
+    val imp = generateFunction(codegen, objCFunctionType(context, methodBridge), "objc2kotlin") {
         block()
     }
 
@@ -1200,8 +1367,8 @@ private val ObjCValueType.llvmType: LLVMTypeRef get() = when (this) {
     ObjCValueType.UNSIGNED_SHORT -> int16Type
     ObjCValueType.UNSIGNED_INT -> int32Type
     ObjCValueType.UNSIGNED_LONG_LONG -> int64Type
-    ObjCValueType.FLOAT -> LLVMFloatType()!!
-    ObjCValueType.DOUBLE -> LLVMDoubleType()!!
+    ObjCValueType.FLOAT -> floatType
+    ObjCValueType.DOUBLE -> doubleType
     ObjCValueType.POINTER -> kInt8Ptr
 }
 
@@ -1216,7 +1383,7 @@ private val MethodBridgeParameter.objCType: LLVMTypeRef get() = when (this) {
 private fun MethodBridge.ReturnValue.objCType(context: Context): LLVMTypeRef {
     return when (this) {
         MethodBridge.ReturnValue.Void -> voidType
-        MethodBridge.ReturnValue.HashCode -> if (context.is64Bit()) int64Type else int32Type
+        MethodBridge.ReturnValue.HashCode -> if (context.is64BitNSInteger()) int64Type else int32Type
         is MethodBridge.ReturnValue.Mapped -> this.bridge.objCType
         MethodBridge.ReturnValue.WithError.Success -> ObjCValueType.BOOL.llvmType
 
@@ -1242,15 +1409,27 @@ internal fun ObjCExportCodeGenerator.getEncoding(methodBridge: MethodBridge): St
         }
     }
 
-    val returnTypeEncoding = methodBridge.returnBridge.objCEncoding
+    val targetFamily = context.config.target.family
+    val returnTypeEncoding = methodBridge.returnBridge.getObjCEncoding(targetFamily)
 
     val paramSize = paramOffset
     return "$returnTypeEncoding$paramSize$params"
 }
 
-private val MethodBridge.ReturnValue.objCEncoding: String get() = when (this) {
+// https://developer.apple.com/documentation/objectivec/nsuinteger?language=objc
+// `typedef unsigned long NSUInteger` on iOS, macOS, tvOS.
+// `typedef unsigned int NSInteger` on watchOS.
+private val Family.nsUIntegerEncoding: String get() = when (this) {
+    Family.OSX,
+    Family.IOS,
+    Family.TVOS -> "L"
+    Family.WATCHOS -> "I"
+    else -> error("Unexpected target platform: $this")
+}
+
+private fun MethodBridge.ReturnValue.getObjCEncoding(targetFamily: Family): String = when (this) {
     MethodBridge.ReturnValue.Void -> "v"
-    MethodBridge.ReturnValue.HashCode -> "L" // NSUInteger = unsigned long; // TODO: `unsigned int` on watchOS
+    MethodBridge.ReturnValue.HashCode -> targetFamily.nsUIntegerEncoding
     is MethodBridge.ReturnValue.Mapped -> this.bridge.objCEncoding
     MethodBridge.ReturnValue.WithError.Success -> ObjCValueType.BOOL.encoding
 
@@ -1272,4 +1451,54 @@ private val TypeBridge.objCEncoding: String get() = when (this) {
     is ValueTypeBridge -> this.objCValueType.encoding
 }
 
-internal fun Context.is64Bit(): Boolean = this.config.target.architecture.bitness == 64
+private fun Context.is64BitNSInteger(): Boolean = when (val target = this.config.target) {
+    KonanTarget.IOS_X64,
+    KonanTarget.IOS_ARM64,
+    KonanTarget.TVOS_ARM64,
+    KonanTarget.TVOS_X64,
+    KonanTarget.MACOS_X64 -> true
+    KonanTarget.WATCHOS_ARM64,
+    KonanTarget.WATCHOS_ARM32,
+    KonanTarget.WATCHOS_X86,
+    KonanTarget.IOS_ARM32 -> false
+    KonanTarget.ANDROID_X64,
+    KonanTarget.ANDROID_X86,
+    KonanTarget.ANDROID_ARM32,
+    KonanTarget.ANDROID_ARM64,
+    KonanTarget.LINUX_X64,
+    KonanTarget.MINGW_X86,
+    KonanTarget.MINGW_X64,
+    KonanTarget.LINUX_ARM64,
+    KonanTarget.LINUX_ARM32_HFP,
+    KonanTarget.LINUX_MIPS32,
+    KonanTarget.LINUX_MIPSEL32,
+    KonanTarget.WASM32,
+    is KonanTarget.ZEPHYR -> error("Target $target has no support for NSInteger type.")
+    KonanTarget.WATCHOS_X64 -> error("Target $target is not supported.")
+}
+
+internal fun Context.is64BitLong(): Boolean = when (val target = this.config.target) {
+    KonanTarget.IOS_X64,
+    KonanTarget.IOS_ARM64,
+    KonanTarget.TVOS_ARM64,
+    KonanTarget.TVOS_X64,
+    KonanTarget.ANDROID_X64,
+    KonanTarget.ANDROID_ARM64,
+    KonanTarget.LINUX_ARM64,
+    KonanTarget.MINGW_X64,
+    KonanTarget.LINUX_X64,
+    KonanTarget.MACOS_X64 -> true
+    KonanTarget.WATCHOS_ARM64,
+    KonanTarget.WATCHOS_ARM32,
+    KonanTarget.ANDROID_X86,
+    KonanTarget.ANDROID_ARM32,
+    KonanTarget.WATCHOS_X86,
+    KonanTarget.MINGW_X86,
+    KonanTarget.LINUX_ARM32_HFP,
+    KonanTarget.LINUX_MIPS32,
+    KonanTarget.LINUX_MIPSEL32,
+    KonanTarget.WASM32,
+    is KonanTarget.ZEPHYR,
+    KonanTarget.IOS_ARM32 -> false
+    KonanTarget.WATCHOS_X64 -> error("Target $target is not supported.")
+}

@@ -23,7 +23,7 @@ buildscript {
   apply from: "$rootBuildDirectory/gradle/kotlinGradlePlugin.gradle"
 
   dependencies {
-    classpath "org.jetbrains.kotlin:kotlin-stdlib:$buildKotlinVersion"
+    classpath "org.jetbrains.kotlin:kotlin-stdlib:$kotlinVersion"
     classpath "org.jetbrains.kotlin:kotlin-native-shared:$konanVersion"
   }
 }
@@ -37,7 +37,7 @@ model {
         binaries.withType(StaticLibraryBinarySpec) { binary ->
           if (!project.parent.convention.plugins.platformInfo.isWindows())
              cppCompiler.args "-fPIC"
-          cppCompiler.args "--std=c++11", "-I${llvmDir}/include", "-I${projectDir}/src/main/include"
+          cppCompiler.args "--std=c++14", "-I${llvmDir}/include", "-I${projectDir}/src/main/include"
           if (isMac()) {
             cppCompiler.args "-DKONAN_MACOS=1"
           } else if (isWindows()) {

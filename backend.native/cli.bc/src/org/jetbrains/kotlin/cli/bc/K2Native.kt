@@ -8,6 +8,7 @@ package org.jetbrains.kotlin.cli.bc
 import com.intellij.openapi.Disposable
 import org.jetbrains.annotations.NotNull
 import org.jetbrains.annotations.Nullable
+import org.jetbrains.kotlin.backend.common.serialization.metadata.KlibMetadataVersion
 import org.jetbrains.kotlin.backend.konan.*
 import org.jetbrains.kotlin.cli.common.*
 import org.jetbrains.kotlin.cli.common.config.addKotlinSourceRoot
@@ -21,18 +22,20 @@ import org.jetbrains.kotlin.config.CommonConfigurationKeys
 import org.jetbrains.kotlin.config.CompilerConfiguration
 import org.jetbrains.kotlin.config.Services
 import org.jetbrains.kotlin.konan.CURRENT
-import org.jetbrains.kotlin.konan.KonanVersion
+import org.jetbrains.kotlin.konan.CompilerVersion
 import org.jetbrains.kotlin.konan.file.File
 import org.jetbrains.kotlin.konan.target.CompilerOutputKind
-import org.jetbrains.kotlin.konan.util.*
 import org.jetbrains.kotlin.metadata.deserialization.BinaryVersion
 import org.jetbrains.kotlin.psi.KtFile
+import org.jetbrains.kotlin.util.profile
 import org.jetbrains.kotlin.utils.KotlinPaths
-import org.jetbrains.kotlin.serialization.konan.KonanMetadataVersion
 
 private class K2NativeCompilerPerformanceManager: CommonCompilerPerformanceManager("Kotlin to Native Compiler")
 class K2Native : CLICompiler<K2NativeCompilerArguments>() {
-    override fun createMetadataVersion(versionArray: IntArray): BinaryVersion = KonanMetadataVersion(*versionArray)
+
+    override fun MutableList<String>.addPlatformOptions(arguments: K2NativeCompilerArguments) {}
+
+    override fun createMetadataVersion(versionArray: IntArray): BinaryVersion = KlibMetadataVersion(*versionArray)
 
     override val performanceManager:CommonCompilerPerformanceManager by lazy {
         K2NativeCompilerPerformanceManager()
@@ -44,7 +47,7 @@ class K2Native : CLICompiler<K2NativeCompilerArguments>() {
                            @Nullable paths: KotlinPaths?): ExitCode {
 
         if (arguments.version) {
-            println("Kotlin/Native: ${KonanVersion.CURRENT}")
+            println("Kotlin/Native: ${CompilerVersion.CURRENT}")
             return ExitCode.OK
         }
 
@@ -67,12 +70,7 @@ class K2Native : CLICompiler<K2NativeCompilerArguments>() {
         /* Set default version of metadata version */
         val metadataVersionString = arguments.metadataVersion
         if (metadataVersionString == null) {
-            configuration.put(CommonConfigurationKeys.METADATA_VERSION, KonanMetadataVersion.INSTANCE)
-        }
-
-        if (konanConfig.linkOnly) {
-            configuration.report(WARNING, "You have not specified any source files. " +
-                    "Only libraries will be used to produce the output binary.")
+            configuration.put(CommonConfigurationKeys.METADATA_VERSION, KlibMetadataVersion.INSTANCE)
         }
 
         try {
@@ -84,7 +82,7 @@ class K2Native : CLICompiler<K2NativeCompilerArguments>() {
                 |Compilation failed: ${e.message}
 
                 | * Source files: ${environment.getSourceFiles().joinToString(transform = KtFile::getName)}
-                | * Compiler version info: Konan: ${KonanVersion.CURRENT} / Kotlin: ${KotlinVersion.CURRENT}
+                | * Compiler version info: Konan: ${CompilerVersion.CURRENT} / Kotlin: ${KotlinVersion.CURRENT}
                 | * Output kind: ${configuration.get(KonanConfigKeys.PRODUCE)}
 
                 """.trimMargin())
@@ -95,7 +93,8 @@ class K2Native : CLICompiler<K2NativeCompilerArguments>() {
     }
 
     val K2NativeCompilerArguments.isUsefulWithoutFreeArgs: Boolean
-        get() = this.listTargets || this.listPhases || this.checkDependencies || this.libraries?.isNotEmpty() ?: false
+        get() = listTargets || listPhases || checkDependencies || !includes.isNullOrEmpty() ||
+                !librariesToCache.isNullOrEmpty()
 
     fun Array<String>?.toNonNullList(): List<String> {
         return this?.asList<String>() ?: listOf<String>()
@@ -116,6 +115,7 @@ class K2Native : CLICompiler<K2NativeCompilerArguments>() {
             with(configuration) {
 
                 put(NODEFAULTLIBS, arguments.nodefaultlibs)
+                put(NOENDORSEDLIBS, arguments.noendorsedlibs)
                 put(NOSTDLIB, arguments.nostdlib)
                 put(NOPACK, arguments.nopack)
                 put(NOMAIN, arguments.nomain)
@@ -195,24 +195,30 @@ class K2Native : CLICompiler<K2NativeCompilerArguments>() {
                     else -> put(GENERATE_TEST_RUNNER, TestRunnerKind.NONE)
                 }
                 // We need to download dependencies only if we use them ( = there are files to compile).
-                put(CHECK_DEPENDENCIES, if (configuration.kotlinSourceRoots.isNotEmpty()) {
-                    true
-                } else {
-                    arguments.checkDependencies
-                })
+                put(
+                    CHECK_DEPENDENCIES,
+                    configuration.kotlinSourceRoots.isNotEmpty()
+                            || !arguments.includes.isNullOrEmpty()
+                            || arguments.checkDependencies
+                )
                 if (arguments.friendModules != null)
                     put(FRIEND_MODULES, arguments.friendModules!!.split(File.pathSeparator).filterNot(String::isEmpty))
 
                 put(EXPORTED_LIBRARIES, selectExportedLibraries(configuration, arguments, outputKind))
+                put(INCLUDED_LIBRARIES, selectIncludes(configuration, arguments, outputKind))
                 put(FRAMEWORK_IMPORT_HEADERS, arguments.frameworkImportHeaders.toNonNullList())
                 arguments.emitLazyObjCHeader?.let { put(EMIT_LAZY_OBJC_HEADER_FILE, it) }
 
-                put(BITCODE_EMBEDDING_MODE, selectBitcodeEmbeddingMode(this, arguments, outputKind))
+                put(BITCODE_EMBEDDING_MODE, selectBitcodeEmbeddingMode(this, arguments))
                 put(DEBUG_INFO_VERSION, arguments.debugInfoFormatVersion.toInt())
                 put(COVERAGE, arguments.coverage)
                 put(LIBRARIES_TO_COVER, arguments.coveredLibraries.toNonNullList())
                 arguments.coverageFile?.let { put(PROFRAW_PATH, it) }
                 put(OBJC_GENERICS, arguments.objcGenerics)
+
+                put(LIBRARIES_TO_CACHE, parseLibrariesToCache(arguments, configuration, outputKind))
+                put(CACHE_DIRECTORIES, arguments.cacheDirectories.toNonNullList())
+                put(CACHED_LIBRARIES, parseCachedLibraries(arguments, configuration))
             }
         }
     }
@@ -224,7 +230,13 @@ class K2Native : CLICompiler<K2NativeCompilerArguments>() {
     companion object {
         @JvmStatic fun main(args: Array<String>) {
             profile("Total compiler main()") {
-                CLITool.doMain(K2Native(), args)
+                doMain(K2Native(), args)
+            }
+        }
+        @JvmStatic fun mainNoExit(args: Array<String>) {
+            profile("Total compiler main()") {
+                if (CLITool.doMainNoExit(K2Native(), args) != ExitCode.OK)
+                    throw KonanCompilationException("Compilation finished with errors")
             }
         }
     }
@@ -249,41 +261,21 @@ private fun selectFrameworkType(
 
 private fun selectBitcodeEmbeddingMode(
         configuration: CompilerConfiguration,
-        arguments: K2NativeCompilerArguments,
-        outputKind: CompilerOutputKind
-): BitcodeEmbedding.Mode {
-
-    if (outputKind != CompilerOutputKind.FRAMEWORK) {
-        return BitcodeEmbedding.Mode.NONE.also {
-            val flag = when {
-                arguments.embedBitcodeMarker -> EMBED_BITCODE_MARKER_FLAG
-                arguments.embedBitcode -> EMBED_BITCODE_FLAG
-                else -> return@also
-            }
-
+        arguments: K2NativeCompilerArguments
+): BitcodeEmbedding.Mode = when {
+    arguments.embedBitcodeMarker -> {
+        if (arguments.embedBitcode) {
             configuration.report(
                     STRONG_WARNING,
-                    "'$flag' is only supported when producing frameworks, " +
-                            "but the compiler is producing ${outputKind.name.toLowerCase()}"
+                    "'$EMBED_BITCODE_FLAG' is ignored because '$EMBED_BITCODE_MARKER_FLAG' is specified"
             )
         }
+        BitcodeEmbedding.Mode.MARKER
     }
-
-    return when {
-        arguments.embedBitcodeMarker -> {
-            if (arguments.embedBitcode) {
-                configuration.report(
-                        STRONG_WARNING,
-                        "'$EMBED_BITCODE_FLAG' is ignored because '$EMBED_BITCODE_MARKER_FLAG' is specified"
-                )
-            }
-            BitcodeEmbedding.Mode.MARKER
-        }
-        arguments.embedBitcode -> {
-            BitcodeEmbedding.Mode.FULL
-        }
-        else -> BitcodeEmbedding.Mode.NONE
+    arguments.embedBitcode -> {
+        BitcodeEmbedding.Mode.FULL
     }
+    else -> BitcodeEmbedding.Mode.NONE
 }
 
 private fun selectExportedLibraries(
@@ -305,5 +297,54 @@ private fun selectExportedLibraries(
     }
 }
 
-fun main(args: Array<String>) = K2Native.main(args)
+private fun selectIncludes(
+    configuration: CompilerConfiguration,
+    arguments: K2NativeCompilerArguments,
+    outputKind: CompilerOutputKind
+): List<String> {
+    val includes = arguments.includes?.toList().orEmpty()
 
+    return if (includes.isNotEmpty() && outputKind == CompilerOutputKind.LIBRARY) {
+        configuration.report(
+            ERROR,
+            "The $INCLUDE_ARG flag is not supported when producing ${outputKind.name.toLowerCase()}"
+        )
+        emptyList()
+    } else {
+        includes
+    }
+}
+
+private fun parseCachedLibraries(
+        arguments: K2NativeCompilerArguments,
+        configuration: CompilerConfiguration
+): Map<String, String> = arguments.cachedLibraries?.asList().orEmpty().mapNotNull {
+    val libraryAndCache = it.split(",")
+    if (libraryAndCache.size != 2) {
+        configuration.report(
+                ERROR,
+                "incorrect $CACHED_LIBRARY format: expected '<library>,<cache>', got '$it'"
+        )
+        null
+    } else {
+        libraryAndCache[0] to libraryAndCache[1]
+    }
+}.toMap()
+
+private fun parseLibrariesToCache(
+        arguments: K2NativeCompilerArguments,
+        configuration: CompilerConfiguration,
+        outputKind: CompilerOutputKind
+): List<String> {
+    val input = arguments.librariesToCache?.asList().orEmpty()
+
+    return if (input.isNotEmpty() && !outputKind.isCache) {
+        configuration.report(ERROR, "$MAKE_CACHE can't be used when not producing cache")
+        emptyList()
+    } else {
+        input
+    }
+}
+
+fun main(args: Array<String>) = K2Native.main(args)
+fun mainNoExit(args: Array<String>) = K2Native.mainNoExit(args)

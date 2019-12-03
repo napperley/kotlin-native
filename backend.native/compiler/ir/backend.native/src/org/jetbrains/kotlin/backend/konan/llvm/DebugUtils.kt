@@ -20,14 +20,14 @@ import org.jetbrains.kotlin.ir.util.isTypeParameter
 import org.jetbrains.kotlin.ir.util.isUnsigned
 import org.jetbrains.kotlin.ir.util.render
 import org.jetbrains.kotlin.konan.CURRENT
-import org.jetbrains.kotlin.konan.KonanVersion
+import org.jetbrains.kotlin.konan.CompilerVersion
 import org.jetbrains.kotlin.konan.file.File
 
 internal object DWARF {
-    val producer                       = "konanc ${KonanVersion.CURRENT} / kotlin-compiler: ${KotlinVersion.CURRENT}"
+    val producer                       = "konanc ${CompilerVersion.CURRENT} / kotlin-compiler: ${KotlinVersion.CURRENT}"
     /* TODO: from LLVM sources is unclear what runtimeVersion corresponds to term in terms of dwarf specification. */
-    val dwarfVersionMetaDataNodeName   = "Dwarf Version".mdString()
-    val dwarfDebugInfoMetaDataNodeName = "Debug Info Version".mdString()
+    val dwarfVersionMetaDataNodeName  get() = "Dwarf Version".mdString()
+    val dwarfDebugInfoMetaDataNodeName get() = "Debug Info Version".mdString()
     const val debugInfoVersion = 3 /* TODO: configurable? */
     /**
      * This is  the value taken from [DIFlags.FlagFwdDecl], to mark type declaration as
@@ -66,12 +66,13 @@ internal class DebugInfo internal constructor(override val context: Context):Con
     val inlinedSubprograms = mutableMapOf<IrFunction, DISubprogramRef>()
     var builder: DIBuilderRef? = null
     var module: DIModuleRef? = null
+    var objHeaderPointerType: DITypeOpaqueRef? = null
     var types = mutableMapOf<IrType, DITypeOpaqueRef>()
 
     val llvmTypes = mapOf<IrType, LLVMTypeRef>(
             context.irBuiltIns.booleanType to context.llvm.llvmInt8,
             context.irBuiltIns.byteType    to context.llvm.llvmInt8,
-            context.irBuiltIns.charType    to context.llvm.llvmInt8,
+            context.irBuiltIns.charType    to context.llvm.llvmInt16,
             context.irBuiltIns.shortType   to context.llvm.llvmInt16,
             context.irBuiltIns.intType     to context.llvm.llvmInt32,
             context.irBuiltIns.longType    to context.llvm.llvmInt64,
@@ -79,7 +80,7 @@ internal class DebugInfo internal constructor(override val context: Context):Con
             context.irBuiltIns.doubleType  to context.llvm.llvmDouble)
     val llvmTypeSizes = llvmTypes.map { it.key to LLVMSizeOfTypeInBits(llvmTargetData, it.value) }.toMap()
     val llvmTypeAlignments = llvmTypes.map {it.key to LLVMPreferredAlignmentOfType(llvmTargetData, it.value)}.toMap()
-    val otherLlvmType = LLVMPointerType(LLVMInt64Type(), 0)!!
+    val otherLlvmType = LLVMPointerType(int64Type, 0)!!
     val otherTypeSize = LLVMSizeOfTypeInBits(llvmTargetData, otherLlvmType)
     val otherTypeAlignment = LLVMPreferredAlignmentOfType(llvmTargetData, otherLlvmType)
 
@@ -127,7 +128,7 @@ internal fun generateDebugInfoHeader(context: Context) {
         @Suppress("UNCHECKED_CAST")
         context.debugInfo.module   = DICreateModule(
                 builder            = context.debugInfo.builder,
-                scope              = context.llvmModule as DIScopeOpaqueRef,
+                scope              = null,
                 name               = path.path(),
                 configurationMacro = "",
                 includePath        = "",
@@ -158,6 +159,21 @@ internal fun generateDebugInfoHeader(context: Context) {
         val llvmModuleFlags = "llvm.module.flags"
         LLVMAddNamedMetadataOperand(context.llvmModule, llvmModuleFlags, dwarfVersion)
         LLVMAddNamedMetadataOperand(context.llvmModule, llvmModuleFlags, nodeDebugInfoVersion)
+        val objHeaderType = DICreateStructType(
+                refBuilder    = context.debugInfo.builder,
+                // TODO: here should be DIFile as scope.
+                scope         = null,
+                name          = "ObjHeader",
+                file          = null,
+                lineNumber    = 0,
+                sizeInBits    = 0,
+                alignInBits   = 0,
+                flags         = DWARF.flagsForwardDeclaration,
+                derivedFrom   = null,
+                elements      = null,
+                elementsCount = 0,
+                refPlace      = null)!! as DITypeOpaqueRef
+        context.debugInfo.objHeaderPointerType = dwarfPointerType(context, objHeaderType)
     }
 }
 
@@ -167,25 +183,7 @@ internal fun IrType.dwarfType(context: Context, targetData: LLVMTargetDataRef): 
         this.computePrimitiveBinaryTypeOrNull() != null -> return debugInfoBaseType(context, targetData, this.render(), llvmType(context), encoding(context).value.toInt())
         else -> {
             return when {
-                classOrNull != null -> {
-                    val type = DICreateStructType(
-                            refBuilder    = context.debugInfo.builder,
-                            // TODO: here should be DIFile as scope.
-                            scope         = null,
-                            name          = "ObjHeader",
-                            file          = null,
-                            lineNumber    = 0,
-                            sizeInBits    = 0,
-                            alignInBits   = 0,
-                            flags         = DWARF.flagsForwardDeclaration,
-                            derivedFrom   = null,
-                            elements      = null,
-                            elementsCount = 0,
-                            refPlace      = null)!! as DITypeOpaqueRef
-                    dwarfPointerType(context, type)
-                }
-                this.isTypeParameter() -> //TODO: Type parameter,  how to deal with if?
-                    debugInfoBaseType(context, targetData, this.toString(), llvmType(context), encoding(context).value.toInt())
+                classOrNull != null || this.isTypeParameter() -> context.debugInfo.objHeaderPointerType!!
                 else -> TODO("$this: Does this case really exist?")
             }
         }
@@ -221,6 +219,7 @@ internal fun IrType.llvmType(context:Context): LLVMTypeRef = context.debugInfo.l
         PrimitiveBinaryType.LONG -> context.llvm.llvmInt64
         PrimitiveBinaryType.FLOAT -> context.llvm.llvmFloat
         PrimitiveBinaryType.DOUBLE -> context.llvm.llvmDouble
+        PrimitiveBinaryType.VECTOR128 -> context.llvm.llvmVector128
         else -> context.debugInfo.otherLlvmType
     }
 }

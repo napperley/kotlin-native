@@ -17,8 +17,11 @@
 #import "Types.h"
 #import "Memory.h"
 #include "Natives.h"
+#include "ObjCInterop.h"
 
 #if KONAN_OBJC_INTEROP
+
+#define OBJC_OLD_DISPATCH_PROTOTYPES 1
 
 #import <Foundation/NSObject.h>
 #import <Foundation/NSValue.h>
@@ -28,11 +31,14 @@
 #import <Foundation/NSException.h>
 #import <Foundation/NSDecimalNumber.h>
 #import <Foundation/NSDictionary.h>
+#import <objc/message.h>
 #import <objc/runtime.h>
 #import <objc/objc-exception.h>
 #import <dispatch/dispatch.h>
 
 #import "ObjCExport.h"
+#import "ObjCExportInit.h"
+#import "ObjCExportPrivate.h"
 #import "MemoryPrivate.hpp"
 #import "Runtime.h"
 #import "Utils.h"
@@ -47,6 +53,8 @@ struct ObjCToKotlinMethodAdapter {
 struct KotlinToObjCMethodAdapter {
   const char* selector;
   MethodNameHash nameSignature;
+  ClassId interfaceId;
+  int itableIndex;
   int vtableIndex;
   const void* kotlinImpl;
 };
@@ -59,6 +67,9 @@ struct ObjCTypeAdapter {
 
   const MethodTableRecord* kotlinMethodTable;
   int kotlinMethodTableSize;
+
+  const InterfaceTableRecord* kotlinItable;
+  int kotlinItableSize;
 
   const char* objCName;
 
@@ -91,7 +102,7 @@ struct WritableTypeInfo {
 
 static char associatedTypeInfoKey;
 
-static const TypeInfo* getAssociatedTypeInfo(Class clazz) {
+extern "C" const TypeInfo* Kotlin_ObjCExport_getAssociatedTypeInfo(Class clazz) {
   return (const TypeInfo*)[objc_getAssociatedObject(clazz, &associatedTypeInfoKey) pointerValue];
 }
 
@@ -101,12 +112,6 @@ static void setAssociatedTypeInfo(Class clazz, const TypeInfo* typeInfo) {
 
 extern "C" id Kotlin_ObjCExport_GetAssociatedObject(ObjHeader* obj) {
   return GetAssociatedObject(obj);
-}
-
-inline static OBJ_GETTER(AllocInstanceWithAssociatedObject, const TypeInfo* typeInfo, id associatedObject) {
-  ObjHeader* result = AllocInstance(typeInfo, OBJ_RESULT);
-  SetAssociatedObject(result, associatedObject);
-  return result;
 }
 
 extern "C" OBJ_GETTER(Kotlin_ObjCExport_AllocInstanceWithAssociatedObject,
@@ -121,130 +126,12 @@ static Class getOrCreateClass(const TypeInfo* typeInfo);
 static void initializeClass(Class clazz);
 extern "C" ALWAYS_INLINE void Kotlin_ObjCExport_releaseAssociatedObject(void* associatedObject);
 
-static inline id AtomicCompareAndSwapAssociatedObject(ObjHeader* obj, id expectedValue, id newValue) {
-  id* location = reinterpret_cast<id*>(&obj->meta_object()->associatedObject_);
-  return __sync_val_compare_and_swap(location, expectedValue, newValue);
-}
-
 extern "C" id objc_retainAutoreleaseReturnValue(id self);
-extern "C" id objc_autoreleaseReturnValue(id self);
-
-@interface NSObject (NSObjectPrivateMethods)
-// Implemented for NSObject in libobjc/NSObject.mm
--(BOOL)_tryRetain;
-@end;
-
-@interface KotlinBase : NSObject <ConvertibleToKotlin, NSCopying>
-@end;
-
-static void initializeObjCExport();
-
-@implementation KotlinBase {
-  KRefSharedHolder refHolder;
-}
-
--(KRef)toKotlin:(KRef*)OBJ_RESULT {
-  RETURN_OBJ(refHolder.ref());
-}
-
-+(void)initialize {
-  if (self == [KotlinBase class]) {
-    initializeObjCExport();
-  }
-  initializeClass(self);
-}
-
-+(instancetype)allocWithZone:(NSZone*)zone {
-  Kotlin_initRuntimeIfNeeded();
-
-  KotlinBase* result = [super allocWithZone:zone];
-
-  const TypeInfo* typeInfo = getAssociatedTypeInfo(self);
-  if (typeInfo == nullptr) {
-    [NSException raise:NSGenericException
-          format:@"%s is not allocatable or +[KotlinBase initialize] method wasn't called on it",
-          class_getName(object_getClass(self))];
-  }
-
-  if (typeInfo->instanceSize_ < 0) {
-    [NSException raise:NSGenericException
-          format:@"%s must be allocated and initialized with a factory method",
-          class_getName(object_getClass(self))];
-  }
-  ObjHolder holder;
-  AllocInstanceWithAssociatedObject(typeInfo, result, holder.slot());
-  UpdateHeapRef(result->refHolder.slotToInit(), holder.obj());
-  return result;
-}
-
-+(instancetype)createWrapper:(ObjHeader*)obj {
-  KotlinBase* candidate = [super allocWithZone:nil];
-  // TODO: should we call NSObject.init ?
-  candidate->refHolder.init(obj);
-
-  if (!obj->permanent()) { // TODO: permanent objects should probably be supported as custom types.
-    if (!obj->container()->shareable()) {
-      SetAssociatedObject(obj, candidate);
-    } else {
-      id old = AtomicCompareAndSwapAssociatedObject(obj, nullptr, candidate);
-      if (old != nullptr) {
-        candidate->refHolder.dispose();
-        [candidate releaseAsAssociatedObject];
-        return objc_retainAutoreleaseReturnValue(old);
-      }
-    }
-  }
-
-  return objc_autoreleaseReturnValue(candidate);
-}
-
--(instancetype)retain {
-  ObjHeader* obj = refHolder.ref();
-  if (obj->permanent()) { // TODO: consider storing `isPermanent` to self field.
-    [super retain];
-  } else {
-    AddRefFromAssociatedObject(obj);
-  }
-  return self;
-}
-
--(BOOL)_tryRetain {
-  ObjHeader* obj = refHolder.ref();
-  if (obj->permanent()) {
-    return [super _tryRetain];
-  } else if (!obj->has_meta_object()) {
-    // Then object is being deallocated;
-    // return `NO` as required by _tryRetain semantics:
-    return NO;
-  } else {
-    AddRefFromAssociatedObject(obj);
-    return YES;
-  }
-}
-
--(oneway void)release {
-  ObjHeader* obj = refHolder.ref();
-  if (obj->permanent()) {
-    [super release];
-  } else {
-    ReleaseRefFromAssociatedObject(obj);
-  }
-}
-
--(void)releaseAsAssociatedObject {
-  [super release];
-}
-
-- (instancetype)copyWithZone:(NSZone *)zone {
-  // TODO: write documentation.
-  return [self retain];
-}
-
-@end;
 
 extern "C" ALWAYS_INLINE void Kotlin_ObjCExport_releaseAssociatedObject(void* associatedObject) {
   if (associatedObject != nullptr) {
-    [((id)associatedObject) releaseAsAssociatedObject];
+    auto msgSend = reinterpret_cast<void (*)(void* self, SEL cmd)>(&objc_msgSend);
+    msgSend(associatedObject, Kotlin_ObjCExport_releaseAsAssociatedObjectSelector);
   }
 }
 
@@ -315,6 +202,8 @@ __attribute__((weak)) int Kotlin_ObjCExport_sortedClassAdaptersNum = 0;
 __attribute__((weak)) const ObjCTypeAdapter** Kotlin_ObjCExport_sortedProtocolAdapters = nullptr;
 __attribute__((weak)) int Kotlin_ObjCExport_sortedProtocolAdaptersNum = 0;
 
+__attribute__((weak)) bool Kotlin_ObjCExport_initTypeAdapters = false;
+
 static const ObjCTypeAdapter* findClassAdapter(Class clazz) {
   return findAdapterByName(class_getName(clazz),
         Kotlin_ObjCExport_sortedClassAdapters,
@@ -351,7 +240,7 @@ static void addProtocolForInterface(Class clazz, const TypeInfo* interfaceInfo) 
 }
 
 extern "C" const TypeInfo* Kotlin_ObjCInterop_getTypeInfoForClass(Class clazz) {
-  const TypeInfo* candidate = getAssociatedTypeInfo(clazz);
+  const TypeInfo* candidate = Kotlin_ObjCExport_getAssociatedTypeInfo(clazz);
 
   if (candidate != nullptr && (candidate->flags_ & TF_OBJC_DYNAMIC) == 0) {
     return candidate;
@@ -368,7 +257,7 @@ extern "C" const TypeInfo* Kotlin_ObjCInterop_getTypeInfoForProtocol(Protocol* p
 
 static const TypeInfo* getOrCreateTypeInfo(Class clazz);
 
-static void initializeClass(Class clazz) {
+extern "C" void Kotlin_ObjCExport_initializeClass(Class clazz) {
   const ObjCTypeAdapter* typeAdapter = findClassAdapter(clazz);
   if (typeAdapter == nullptr) {
     getOrCreateTypeInfo(clazz);
@@ -403,10 +292,14 @@ static void initializeClass(Class clazz) {
 
 }
 
-static ALWAYS_INLINE OBJ_GETTER(convertUnmappedObjCObject, id obj) {
+extern "C" ALWAYS_INLINE OBJ_GETTER(Kotlin_ObjCExport_convertUnmappedObjCObject, id obj) {
   const TypeInfo* typeInfo = getOrCreateTypeInfo(object_getClass(obj));
   RETURN_RESULT_OF(AllocInstanceWithAssociatedObject, typeInfo, objc_retain(obj));
 }
+
+// Initialized by [ObjCExportClasses.mm].
+extern "C" SEL Kotlin_ObjCExport_toKotlinSelector = nullptr;
+extern "C" SEL Kotlin_ObjCExport_releaseAsAssociatedObjectSelector = nullptr;
 
 static OBJ_GETTER(blockToKotlinImp, id self, SEL cmd);
 static OBJ_GETTER(boxedBooleanToKotlinImp, NSNumber* self, SEL cmd);
@@ -414,15 +307,32 @@ static OBJ_GETTER(boxedBooleanToKotlinImp, NSNumber* self, SEL cmd);
 static OBJ_GETTER(SwiftObject_toKotlinImp, id self, SEL cmd);
 static void SwiftObject_releaseAsAssociatedObjectImp(id self, SEL cmd);
 
-static void checkLoadedOnce();
+static void initTypeAdaptersFrom(const ObjCTypeAdapter** adapters, int count) {
+  for (int index = 0; index < count; ++index) {
+    const ObjCTypeAdapter* adapter = adapters[index];
+    const TypeInfo* typeInfo = adapter->kotlinTypeInfo;
+    if (typeInfo != nullptr) {
+      typeInfo->writableInfo_->objCExport.typeAdapter = adapter;
+    }
+  }
+}
 
-static void initializeObjCExport() {
-  SEL toKotlinSelector = @selector(toKotlin:);
+static void initTypeAdapters() {
+  if (!Kotlin_ObjCExport_initTypeAdapters) return;
+
+  initTypeAdaptersFrom(Kotlin_ObjCExport_sortedClassAdapters, Kotlin_ObjCExport_sortedClassAdaptersNum);
+  initTypeAdaptersFrom(Kotlin_ObjCExport_sortedProtocolAdapters, Kotlin_ObjCExport_sortedProtocolAdaptersNum);
+}
+
+static void Kotlin_ObjCExport_initializeImpl() {
+  initTypeAdapters();
+
+  SEL toKotlinSelector = Kotlin_ObjCExport_toKotlinSelector;
   Method toKotlinMethod = class_getClassMethod([NSObject class], toKotlinSelector);
   RuntimeAssert(toKotlinMethod != nullptr, "");
   const char* toKotlinTypeEncoding = method_getTypeEncoding(toKotlinMethod);
 
-  SEL releaseAsAssociatedObjectSelector = @selector(releaseAsAssociatedObject);
+  SEL releaseAsAssociatedObjectSelector = Kotlin_ObjCExport_releaseAsAssociatedObjectSelector;
   Method releaseAsAssociatedObjectMethod = class_getClassMethod([NSObject class], releaseAsAssociatedObjectSelector);
   RuntimeAssert(releaseAsAssociatedObjectMethod != nullptr, "");
   const char* releaseAsAssociatedObjectTypeEncoding = method_getTypeEncoding(releaseAsAssociatedObjectMethod);
@@ -456,98 +366,31 @@ static void initializeObjCExport() {
   }
 }
 
-@interface NSObject (NSObjectToKotlin) <ConvertibleToKotlin>
-@end;
-
-@implementation NSObject (NSObjectToKotlin)
--(ObjHeader*)toKotlin:(ObjHeader**)OBJ_RESULT {
-  RETURN_RESULT_OF(convertUnmappedObjCObject, self);
-}
-
--(void)releaseAsAssociatedObject {
-  objc_release(self);
-}
-
-+(void)load {
-  static dispatch_once_t onceToken = 0;
+// Initializes ObjCExport for current process (if not initialized yet).
+// Generally this is equal to some "binary patching" (which is usually done at link time
+// but postponed until runtime here due to various reasons):
+// adds methods to Objective-C classes, initializes static memory with "constant" values etc.
+extern "C" void Kotlin_ObjCExport_initialize() {
+  static dispatch_once_t onceToken;
   dispatch_once(&onceToken, ^{
-    checkLoadedOnce();
+    Kotlin_ObjCExport_initializeImpl();
   });
 }
-@end;
 
 static OBJ_GETTER(SwiftObject_toKotlinImp, id self, SEL cmd) {
-  RETURN_RESULT_OF(convertUnmappedObjCObject, self);
+  RETURN_RESULT_OF(Kotlin_ObjCExport_convertUnmappedObjCObject, self);
 }
 
 static void SwiftObject_releaseAsAssociatedObjectImp(id self, SEL cmd) {
   objc_release(self);
 }
 
-@interface NSString (NSStringToKotlin) <ConvertibleToKotlin>
-@end;
 
-@implementation NSString (NSStringToKotlin)
--(ObjHeader*)toKotlin:(ObjHeader**)OBJ_RESULT {
-  RETURN_RESULT_OF(Kotlin_Interop_CreateKStringFromNSString, self);
-}
-@end;
-
-extern "C" {
-
-OBJ_GETTER(Kotlin_boxBoolean, KBoolean value);
-OBJ_GETTER(Kotlin_boxByte, KByte value);
-OBJ_GETTER(Kotlin_boxShort, KShort value);
-OBJ_GETTER(Kotlin_boxInt, KInt value);
-OBJ_GETTER(Kotlin_boxLong, KLong value);
-OBJ_GETTER(Kotlin_boxUByte, KUByte value);
-OBJ_GETTER(Kotlin_boxUShort, KUShort value);
-OBJ_GETTER(Kotlin_boxUInt, KUInt value);
-OBJ_GETTER(Kotlin_boxULong, KULong value);
-OBJ_GETTER(Kotlin_boxFloat, KFloat value);
-OBJ_GETTER(Kotlin_boxDouble, KDouble value);
-
-}
+extern "C" OBJ_GETTER(Kotlin_boxBoolean, KBoolean value);
 
 static OBJ_GETTER(boxedBooleanToKotlinImp, NSNumber* self, SEL cmd) {
   RETURN_RESULT_OF(Kotlin_boxBoolean, self.boolValue);
 }
-
-@interface NSNumber (NSNumberToKotlin) <ConvertibleToKotlin>
-@end;
-
-@implementation NSNumber (NSNumberToKotlin)
--(ObjHeader*)toKotlin:(ObjHeader**)OBJ_RESULT {
-  const char* type = self.objCType;
-
-  // TODO: the code below makes some assumption on char, short, int and long sizes.
-
-  switch (type[0]) {
-    case 'c': RETURN_RESULT_OF(Kotlin_boxByte, self.charValue);
-    case 's': RETURN_RESULT_OF(Kotlin_boxShort, self.shortValue);
-    case 'i': RETURN_RESULT_OF(Kotlin_boxInt, self.intValue);
-    case 'q': RETURN_RESULT_OF(Kotlin_boxLong, self.longLongValue);
-    case 'C': RETURN_RESULT_OF(Kotlin_boxUByte, self.unsignedCharValue);
-    case 'S': RETURN_RESULT_OF(Kotlin_boxUShort, self.unsignedShortValue);
-    case 'I': RETURN_RESULT_OF(Kotlin_boxUInt, self.unsignedIntValue);
-    case 'Q': RETURN_RESULT_OF(Kotlin_boxULong, self.unsignedLongLongValue);
-    case 'f': RETURN_RESULT_OF(Kotlin_boxFloat, self.floatValue);
-    case 'd': RETURN_RESULT_OF(Kotlin_boxDouble, self.doubleValue);
-
-    default:  RETURN_RESULT_OF(convertUnmappedObjCObject, self);
-  }
-}
-@end;
-
-@interface NSDecimalNumber (NSDecimalNumberToKotlin) <ConvertibleToKotlin>
-@end;
-
-@implementation NSDecimalNumber (NSDecimalNumberToKotlin)
-// Overrides [NSNumber toKotlin:] implementation.
--(ObjHeader*)toKotlin:(ObjHeader**)OBJ_RESULT {
-  RETURN_RESULT_OF(convertUnmappedObjCObject, self);
-}
-@end;
 
 struct Block_descriptor_1;
 
@@ -597,8 +440,11 @@ static const char* getBlockEncoding(id block) {
       reinterpret_cast<struct Block_descriptor_1_without_helpers*>(literal->descriptor)->signature;
 }
 
-// Note: replaced by compiler in appropriate compilation modes.
-__attribute__((weak)) convertReferenceFromObjC* Kotlin_ObjCExport_blockToFunctionConverters = nullptr;
+// Note: defined by compiler.
+extern "C" convertReferenceFromObjC* Kotlin_ObjCExport_blockToFunctionConverters;
+extern "C" int Kotlin_ObjCExport_blockToFunctionConverters_size;
+
+extern "C" id objc_retainBlock(id self);
 
 static OBJ_GETTER(blockToKotlinImp, id block, SEL cmd) {
   const char* encoding = getBlockEncoding(block);
@@ -606,10 +452,6 @@ static OBJ_GETTER(blockToKotlinImp, id block, SEL cmd) {
   // TODO: optimize:
   NSMethodSignature *signature = [NSMethodSignature signatureWithObjCTypes:encoding];
   int parameterCount = signature.numberOfArguments - 1; // 1 for the block itself.
-
-  if (parameterCount > 22) {
-    [NSException raise:NSGenericException format:@"Blocks with %d (>22) parameters aren't supported", parameterCount];
-  }
 
   for (int i = 1; i <= parameterCount; ++i) {
     const char* argEncoding = [signature getArgumentTypeAtIndex:i];
@@ -625,7 +467,17 @@ static OBJ_GETTER(blockToKotlinImp, id block, SEL cmd) {
           format:@"Blocks with non-reference-typed return value aren't supported (%s)", returnTypeEncoding];
   }
 
-  RETURN_RESULT_OF(Kotlin_ObjCExport_blockToFunctionConverters[parameterCount], block);
+  auto converter = parameterCount < Kotlin_ObjCExport_blockToFunctionConverters_size
+          ? Kotlin_ObjCExport_blockToFunctionConverters[parameterCount]
+          : nullptr;
+
+  if (converter != nullptr) {
+    RETURN_RESULT_OF(converter, block);
+  } else {
+    // There is no function class for this arity, so resulting object will not be cast to FunctionN class,
+    // and it is enough to convert block to arbitrary object conforming Function.
+    RETURN_RESULT_OF(AllocInstanceWithAssociatedObject, theOpaqueFunctionTypeInfo, objc_retainBlock(block));
+  }
 }
 
 static id Kotlin_ObjCExport_refToObjC_slowpath(ObjHeader* obj);
@@ -673,8 +525,8 @@ extern "C" OBJ_GETTER(Kotlin_Interop_CreateObjCObjectHolder, id obj) {
 
 extern "C" OBJ_GETTER(Kotlin_ObjCExport_refFromObjC, id obj) {
   if (obj == nullptr) RETURN_OBJ(nullptr);
-  id convertible = (id<ConvertibleToKotlin>)obj;
-  return [convertible toKotlin:OBJ_RESULT];
+  auto msgSend = reinterpret_cast<ObjHeader* (*)(id self, SEL cmd, ObjHeader** slot)>(&objc_msgSend);
+  RETURN_RESULT_OF(msgSend, obj, Kotlin_ObjCExport_toKotlinSelector);
 }
 
 static id convertKotlinObject(ObjHeader* obj) {
@@ -721,11 +573,72 @@ static id Kotlin_ObjCExport_refToObjC_slowpath(ObjHeader* obj) {
   return converter(obj);
 }
 
+static void buildITable(TypeInfo* result, const KStdOrderedMap<ClassId, KStdVector<VTableElement>>& interfaceVTables) {
+  // Check if can use fast optimistic version - check if the size of the itable could be 2^k and <= 32.
+  bool useFastITable;
+  int itableSize = 1;
+  for (; itableSize <= 32; itableSize <<= 1) {
+    useFastITable = true;
+    bool used[32];
+    memset(used, 0, sizeof(used));
+    for (auto& pair : interfaceVTables) {
+      auto interfaceId = pair.first;
+      auto index = interfaceId & (itableSize - 1);
+      if (used[index]) {
+        useFastITable = false;
+        break;
+      }
+      used[index] = true;
+    }
+    if (useFastITable) break;
+  }
+  if (!useFastITable)
+    itableSize = interfaceVTables.size();
+
+  auto itable_ = konanAllocArray<InterfaceTableRecord>(itableSize);
+  result->interfaceTable_ = itable_;
+  result->interfaceTableSize_ = useFastITable ? itableSize - 1 : -itableSize;
+
+  if (useFastITable) {
+    for (auto& pair : interfaceVTables) {
+      auto interfaceId = pair.first;
+      auto index = interfaceId & (itableSize - 1);
+      itable_[index].id = interfaceId;
+    }
+  } else {
+    // Otherwise: conservative version.
+    // The table will be sorted since we're using KStdOrderedMap.
+    int index = 0;
+    for (auto& pair : interfaceVTables) {
+      auto interfaceId = pair.first;
+      itable_[index++].id = interfaceId;
+    }
+  }
+
+  for (int i = 0; i < itableSize; ++i) {
+    auto interfaceId = itable_[i].id;
+    if (interfaceId == kInvalidInterfaceId) continue;
+    auto interfaceVTableIt = interfaceVTables.find(interfaceId);
+    RuntimeAssert(interfaceVTableIt != interfaceVTables.end(), "");
+    auto const& interfaceVTable = interfaceVTableIt->second;
+    int interfaceVTableSize = interfaceVTable.size();
+    auto interfaceVTable_ = interfaceVTableSize == 0 ? nullptr : konanAllocArray<VTableElement>(interfaceVTableSize);
+    for (int j = 0; j < interfaceVTableSize; ++j)
+      interfaceVTable_[j] = interfaceVTable[j];
+    itable_[i].vtable = interfaceVTable_;
+    itable_[i].vtableSize = interfaceVTableSize;
+  }
+}
+
 static const TypeInfo* createTypeInfo(
   const TypeInfo* superType,
   const KStdVector<const TypeInfo*>& superInterfaces,
-  const KStdVector<const void*>& vtable,
-  const KStdVector<MethodTableRecord>& methodTable
+  const KStdVector<VTableElement>& vtable,
+  const KStdVector<MethodTableRecord>& methodTable,
+  const KStdOrderedMap<ClassId, KStdVector<VTableElement>>& interfaceVTables,
+  const InterfaceTableRecord* superItable,
+  int superItableSize,
+  bool itableEqualsSuper
 ) {
   TypeInfo* result = (TypeInfo*)konanAllocMemory(sizeof(TypeInfo) + vtable.size() * sizeof(void*));
   result->typeInfo_ = result;
@@ -739,6 +652,8 @@ static const TypeInfo* createTypeInfo(
   if ((superType->flags_ & TF_IMMUTABLE) != 0) {
     result->flags_ |= TF_IMMUTABLE;
   }
+
+  result->classId_ = superType->classId_;
 
   KStdVector<const TypeInfo*> implementedInterfaces(
     superType->implementedInterfaces_, superType->implementedInterfaces_ + superType->implementedInterfacesCount_
@@ -758,6 +673,14 @@ static const TypeInfo* createTypeInfo(
 
   result->implementedInterfaces_ = implementedInterfaces_;
   result->implementedInterfacesCount_ = implementedInterfaces.size();
+  if (superItable != nullptr) {
+    if (itableEqualsSuper) {
+      result->interfaceTableSize_ = superItableSize;
+      result->interfaceTable_ = superItable;
+    } else {
+      buildITable(result, interfaceVTables);
+    }
+  }
 
   MethodTableRecord* openMethods_ = konanAllocArray<MethodTableRecord>(methodTable.size());
   for (int i = 0; i < methodTable.size(); ++i) openMethods_[i] = methodTable[i];
@@ -883,6 +806,9 @@ static const TypeInfo* createTypeInfo(Class clazz, const TypeInfo* superType) {
   const MethodTableRecord* superMethodTable = nullptr;
   int superMethodTableSize = 0;
 
+  InterfaceTableRecord const* superITable = nullptr;
+  int superITableSize = 0;
+
   if (superTypeAdapter != nullptr) {
     // Then super class is Kotlin class.
 
@@ -891,6 +817,8 @@ static const TypeInfo* createTypeInfo(Class clazz, const TypeInfo* superType) {
     superVtable = superTypeAdapter->kotlinVtable;
     superMethodTable = superTypeAdapter->kotlinMethodTable;
     superMethodTableSize = superTypeAdapter->kotlinMethodTableSize;
+    superITable = superTypeAdapter->kotlinItable;
+    superITableSize = superTypeAdapter->kotlinItableSize;
   }
 
   if (superVtable == nullptr) superVtable = superType->vtable();
@@ -908,6 +836,25 @@ static const TypeInfo* createTypeInfo(Class clazz, const TypeInfo* superType) {
         superMethodTable, superMethodTable + superMethodTableSize
   );
 
+  if (superITable == nullptr) {
+    superITable = superType->interfaceTable_;
+    superITableSize = superType->interfaceTableSize_;
+  }
+  KStdOrderedMap<ClassId, KStdVector<VTableElement>> interfaceVTables;
+  if (superITable != nullptr) {
+    int actualItableSize = superITableSize >= 0 ? superITableSize + 1 : -superITableSize;
+    for (int i = 0; i < actualItableSize; ++i) {
+      auto& record = superITable[i];
+      auto interfaceId = record.id;
+      if (interfaceId == kInvalidInterfaceId) continue;
+      int vtableSize = record.vtableSize;
+      KStdVector<VTableElement> interfaceVTable(vtableSize);
+      for (int j = 0; j < vtableSize; ++j)
+        interfaceVTable[j] = record.vtable[j];
+      interfaceVTables.emplace(interfaceId, std::move(interfaceVTable));
+    }
+  }
+
   KStdVector<const TypeInfo*> addedInterfaces = getProtocolsAsInterfaces(clazz);
 
   KStdVector<const TypeInfo*> supers(
@@ -919,6 +866,16 @@ static const TypeInfo* createTypeInfo(Class clazz, const TypeInfo* superType) {
     supers.push_back(t);
   }
 
+  auto addToITable = [&interfaceVTables](ClassId interfaceId, int methodIndex, VTableElement entry) {
+    RuntimeAssert(interfaceId != kInvalidInterfaceId, "");
+    auto interfaceVTableIt = interfaceVTables.find(interfaceId);
+    RuntimeAssert(interfaceVTableIt != interfaceVTables.end(), "");
+    auto& interfaceVTable = interfaceVTableIt->second;
+    RuntimeAssert(methodIndex >= 0 && methodIndex < interfaceVTable.size(), "");
+    interfaceVTable[methodIndex] = entry;
+  };
+
+  bool itableEqualsSuper = true;
   for (const TypeInfo* t : supers) {
     const ObjCTypeAdapter* typeAdapter = getTypeAdapter(t);
     if (typeAdapter == nullptr) continue;
@@ -929,27 +886,51 @@ static const TypeInfo* createTypeInfo(Class clazz, const TypeInfo* superType) {
 
       throwIfCantBeOverridden(clazz, adapter);
 
+      itableEqualsSuper = false;
       insertOrReplace(methodTable, adapter->nameSignature, const_cast<void*>(adapter->kotlinImpl));
       if (adapter->vtableIndex != -1) vtable[adapter->vtableIndex] = adapter->kotlinImpl;
+
+      if (adapter->itableIndex != -1 && superITable != nullptr)
+        addToITable(adapter->interfaceId, adapter->itableIndex, adapter->kotlinImpl);
     }
   }
 
   for (const TypeInfo* typeInfo : addedInterfaces) {
     const ObjCTypeAdapter* typeAdapter = getTypeAdapter(typeInfo);
+
     if (typeAdapter == nullptr) continue;
 
+    if (superITable != nullptr) {
+      auto interfaceId = typeInfo->classId_;
+      int interfaceVTableSize = typeAdapter->kotlinItableSize;
+      RuntimeAssert(interfaceVTableSize >= 0, "");
+      auto interfaceVTablesIt = interfaceVTables.find(interfaceId);
+      if (interfaceVTablesIt == interfaceVTables.end()) {
+        itableEqualsSuper = false;
+        interfaceVTables.emplace(interfaceId, std::move(KStdVector<VTableElement>(interfaceVTableSize)));
+      } else {
+        auto const& interfaceVTable = interfaceVTablesIt->second;
+        RuntimeAssert(interfaceVTable.size() == interfaceVTableSize, "");
+      }
+    }
+
     for (int i = 0; i < typeAdapter->reverseAdapterNum; ++i) {
+      itableEqualsSuper = false;
       const KotlinToObjCMethodAdapter* adapter = &typeAdapter->reverseAdapters[i];
       throwIfCantBeOverridden(clazz, adapter);
 
       insertOrReplace(methodTable, adapter->nameSignature, const_cast<void*>(adapter->kotlinImpl));
       RuntimeAssert(adapter->vtableIndex == -1, "");
+
+      if (adapter->itableIndex != -1 && superITable != nullptr)
+        addToITable(adapter->interfaceId, adapter->itableIndex, adapter->kotlinImpl);
     }
   }
 
   // TODO: consider forbidding the class being abstract.
 
-  const TypeInfo* result = createTypeInfo(superType, addedInterfaces, vtable, methodTable);
+  const TypeInfo* result = createTypeInfo(superType, addedInterfaces, vtable, methodTable,
+                                          interfaceVTables, superITable, superITableSize, itableEqualsSuper);
 
   // TODO: it will probably never be requested, since such a class can't be instantiated in Kotlin.
   result->writableInfo_->objCExport.objCClass = clazz;
@@ -959,7 +940,7 @@ static const TypeInfo* createTypeInfo(Class clazz, const TypeInfo* superType) {
 static SimpleMutex typeInfoCreationMutex;
 
 static const TypeInfo* getOrCreateTypeInfo(Class clazz) {
-  const TypeInfo* result = getAssociatedTypeInfo(clazz);
+  const TypeInfo* result = Kotlin_ObjCExport_getAssociatedTypeInfo(clazz);
   if (result != nullptr) {
     return result;
   }
@@ -972,7 +953,7 @@ static const TypeInfo* getOrCreateTypeInfo(Class clazz) {
 
   LockGuard<SimpleMutex> lockGuard(typeInfoCreationMutex);
 
-  result = getAssociatedTypeInfo(clazz); // double-checking.
+  result = Kotlin_ObjCExport_getAssociatedTypeInfo(clazz); // double-checking.
   if (result == nullptr) {
     result = createTypeInfo(clazz, superType);
     setAssociatedTypeInfo(clazz, result);
@@ -996,12 +977,13 @@ static void addVirtualAdapters(Class clazz, const ObjCTypeAdapter* typeAdapter) 
 static Class createClass(const TypeInfo* typeInfo, Class superClass) {
   RuntimeAssert(typeInfo->superType_ != nullptr, "");
 
-  char classNameBuffer[64];
-  snprintf(classNameBuffer, sizeof(classNameBuffer), "kobjcc%d", anonymousClassNextId++);
-  const char* className = classNameBuffer;
+  int classIndex = (anonymousClassNextId++);
+  KStdString className = Kotlin_ObjCInterop_getUniquePrefix();
+  className += "_kobjcc";
+  className += std::to_string(classIndex);
 
-  Class result = objc_allocateClassPair(superClass, className, 0);
-  RuntimeAssert(result != nullptr, "");
+  Class result = objc_allocateClassPair(superClass, className.c_str(), 0);
+  RuntimeCheck(result != nullptr, "");
 
   // TODO: optimize by adding virtual adapters only for overridden methods.
 
@@ -1071,16 +1053,6 @@ extern "C" void Kotlin_ObjCExport_AbstractMethodCalled(id self, SEL selector) {
   [NSException raise:NSGenericException
         format:@"[%s %s] is abstract",
         class_getName(object_getClass(self)), sel_getName(selector)];
-}
-
-static void checkLoadedOnce() {
-  Class marker = objc_allocateClassPair([NSObject class], "KotlinFrameworkLoadedOnceMarker", 0);
-  if (marker == nullptr) {
-    [NSException raise:NSGenericException
-          format:@"Only one Kotlin framework can be loaded currently"];
-  } else {
-    objc_registerClassPair(marker);
-  }
 }
 
 #else

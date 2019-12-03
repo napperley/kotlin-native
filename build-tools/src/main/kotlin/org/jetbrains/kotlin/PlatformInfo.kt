@@ -15,12 +15,12 @@ object PlatformInfo {
     @JvmStatic
     fun isAppleTarget(project: Project): Boolean {
         val target = getTarget(project)
-        return target.family == Family.IOS || target.family == Family.OSX
+        return target.family.isAppleFamily
     }
 
     @JvmStatic
     fun isAppleTarget(target: KonanTarget): Boolean {
-        return target.family == Family.IOS || target.family == Family.OSX
+        return target.family.isAppleFamily
     }
 
     @JvmStatic
@@ -35,6 +35,25 @@ object PlatformInfo {
         val platformManager = project.rootProject.platformManager()
         val targetName = project.project.testTarget().name
         return platformManager.targetManager(targetName).target
+    }
+
+    @JvmStatic
+    fun checkXcodeVersion(project: Project) {
+        val properties = PropertiesProvider(project)
+        val requiredMajorVersion = properties.xcodeMajorVersion
+
+        if (!DependencyProcessor.isInternalSeverAvailable
+                && properties.checkXcodeVersion
+                && requiredMajorVersion != null
+        ) {
+            val currentXcodeVersion = Xcode.current.version
+            val currentMajorVersion = currentXcodeVersion.splitToSequence('.').first()
+            if (currentMajorVersion != requiredMajorVersion) {
+                throw IllegalStateException(
+                        "Incorrect Xcode version: ${currentXcodeVersion}. Required major Xcode version is ${requiredMajorVersion}."
+                )
+            }
+        }
     }
 
     fun unsupportedPlatformException() = TargetSupportException()

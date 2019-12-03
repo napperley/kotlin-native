@@ -10,7 +10,6 @@ import org.jetbrains.kotlin.backend.konan.descriptors.isAbstract
 import org.jetbrains.kotlin.backend.konan.descriptors.target
 import org.jetbrains.kotlin.backend.konan.ir.*
 import org.jetbrains.kotlin.backend.konan.llvm.*
-import org.jetbrains.kotlin.backend.konan.llvm.KonanMangler.functionName
 import org.jetbrains.kotlin.backend.konan.llvm.KonanMangler.symbolName
 import org.jetbrains.kotlin.backend.konan.lower.DECLARATION_ORIGIN_BRIDGE_METHOD
 import org.jetbrains.kotlin.backend.konan.lower.bridgeTarget
@@ -30,8 +29,7 @@ import org.jetbrains.kotlin.ir.visitors.acceptChildrenVoid
 import org.jetbrains.kotlin.load.java.BuiltinMethodsWithSpecialGenericSignature
 import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.name.Name
-import org.jetbrains.kotlin.resolve.constants.ConstantValue
-import org.jetbrains.kotlin.resolve.constants.IntValue
+import org.jetbrains.kotlin.backend.konan.descriptors.isBuiltInOperator
 
 internal object DataFlowIR {
 
@@ -500,13 +498,10 @@ internal object DataFlowIR {
 
         private fun IrClass.isFinal() = modality == Modality.FINAL
 
-        fun mapClassReferenceType(irClass: IrClass, eraseLocalObjects: Boolean = true): Type {
+        fun mapClassReferenceType(irClass: IrClass): Type {
             // Do not try to devirtualize ObjC classes.
             if (irClass.module.name == Name.special("<forward declarations>") || irClass.isObjCClass())
                 return Type.Virtual
-
-            if (eraseLocalObjects && irClass.isAnonymousObject)
-                return mapClassReferenceType(irClass.getSuperClassNotAny() ?: context.irBuiltIns.anyClass.owner)
 
             val isFinal = irClass.isFinal()
             val isAbstract = irClass.isAbstract()
@@ -532,6 +527,9 @@ internal object DataFlowIR {
                 layoutBuilder.methodTableEntries.forEach {
                     type.itable[it.overriddenFunction.functionName.localHash.value] = mapFunction(it.getImplementation(context)!!)
                 }
+            } else if (irClass.isInterface) {
+                // Warmup interface table so it is computed before DCE.
+                context.getLayoutBuilder(irClass).interfaceTableEntries
             }
             return type
         }
@@ -556,11 +554,11 @@ internal object DataFlowIR {
                     )
                 }
 
-        fun mapType(type: IrType, eraseLocalObjects: Boolean = true): Type {
+        fun mapType(type: IrType): Type {
             val binaryType = type.computeBinaryType()
             return when (binaryType) {
                 is BinaryType.Primitive -> mapPrimitiveBinaryType(binaryType.type)
-                is BinaryType.Reference -> mapClassReferenceType(choosePrimary(binaryType.types.toList()), eraseLocalObjects)
+                is BinaryType.Reference -> mapClassReferenceType(choosePrimary(binaryType.types.toList()))
             }
         }
 
@@ -599,7 +597,7 @@ internal object DataFlowIR {
                 attributes = attributes or FunctionAttributes.EXPLICITLY_EXPORTED
             }
             val symbol = when {
-                it.isExternal || (it.symbol in context.irBuiltIns.irBuiltInsSymbols) -> {
+                it.isExternal || it.isBuiltInOperator -> {
                     val escapesAnnotation = it.annotations.findAnnotation(FQ_NAME_ESCAPES)
                     val pointsToAnnotation = it.annotations.findAnnotation(FQ_NAME_POINTS_TO)
                     @Suppress("UNCHECKED_CAST")
