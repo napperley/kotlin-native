@@ -7,6 +7,20 @@ plugins {
 
 kotlin {
     linuxX64("linux") {
+        compilations.getByName("main") {
+            cinterops.create("gtk3") {
+                val userIncludeDir = "/usr/include"
+                includeDirs(
+                    "$userIncludeDir/atk-1.0",
+                    "$userIncludeDir/gdk-pixbuf-2.0",
+                    "$userIncludeDir/cairo",
+                    "$userIncludeDir/pango-1.0",
+                    "$userIncludeDir/gtk-3.0",
+                    "$userIncludeDir/glib-2.0",
+                    "/usr/lib/x86_64-linux-gnu/glib-2.0/include"
+                )
+            }
+        }
         binaries {
             executable {
                 entryPoint = "org.example.kpad.main"
