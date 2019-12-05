@@ -11,6 +11,32 @@ internal class MainWindow {
     var winPtr: CPointer<GtkWidget>? = null
     private var editor: CPointer<GtkWidget>? = null
     private var statusBar: CPointer<GtkWidget>? = null
+    var title = ""
+        set(value) {
+            gtk_window_set_title(winPtr?.reinterpret(), value)
+            field = value
+        }
+
+    private fun createToolbar(): CPointer<GtkToolbar>? {
+        val toolbar = gtk_toolbar_new()
+        val newBtn = gtk_button_new_with_label("New")
+        val openBtn = gtk_button_new_with_label("Open")
+        val saveBtn = gtk_button_new_with_label("Save")
+        val newItem = gtk_tool_item_new()
+        val openItem = gtk_tool_item_new()
+        val saveItem = gtk_tool_item_new()
+        val toolItems = arrayOf(newItem, openItem, saveItem)
+
+        if (openBtn != null && newBtn != null && saveBtn != null) {
+            gtk_container_add(newItem?.reinterpret(), newBtn.reinterpret())
+            gtk_container_add(openItem?.reinterpret(), openBtn.reinterpret())
+            gtk_container_add(saveItem?.reinterpret(), saveBtn.reinterpret())
+        }
+        toolItems.forEachIndexed { pos, ti ->
+            gtk_toolbar_insert(toolbar?.reinterpret(), ti?.reinterpret(), pos)
+        }
+        return toolbar?.reinterpret()
+    }
 
     fun fetchReference() = stableRef.asCPointer()
 
@@ -21,7 +47,9 @@ internal class MainWindow {
     fun createMainLayout(): CPointer<GtkContainer>? {
         val mainLayout = gtk_box_new(GtkOrientation.GTK_ORIENTATION_VERTICAL, 0)
         val scrolledWin = createScrolledWindow()
+        val toolbar = createToolbar()
         createStatusBar()
+        gtk_container_add(mainLayout?.reinterpret(), toolbar?.reinterpret())
         Controller.prependWidgetToBox(box = mainLayout?.reinterpret(), widget = scrolledWin?.reinterpret(),
             expand = true)
         Controller.appendWidgetToBox(box = mainLayout?.reinterpret(), widget = statusBar?.reinterpret())
@@ -44,9 +72,5 @@ internal class MainWindow {
         gtk_text_view_set_cursor_visible(editor?.reinterpret(), TRUE)
         gtk_container_add(scrolledWin?.reinterpret(), editor)
         return scrolledWin?.reinterpret()
-    }
-
-    fun updateTitle(title: String) {
-        gtk_window_set_title(winPtr?.reinterpret(), title)
     }
 }
