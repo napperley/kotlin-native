@@ -33,6 +33,29 @@ internal object Controller {
     )
 
     /**
+     * With a vertical box a [widget] is added to the *bottom* of the [box]. If the box is horizontal then a [widget] is
+     * added to the *right* of the [box].
+     * @param box A [pointer][CPointer] to the GtkBox.
+     * @param widget A [pointer][CPointer] to the GtkWidget.
+     * @param fill If *true* then the added [widget] will be sized to use all of the available space.
+     * @param expand If *true* then the added [widget] will be resized every time the [box] is resized.
+     * @param padding The amount of padding to use for the [widget] which is in pixels. By default no padding is used.
+     */
+    fun appendWidgetToBox(
+        box: CPointer<GtkBox>?,
+        widget: CPointer<GtkWidget>?,
+        fill: Boolean = true,
+        expand: Boolean = false,
+        padding: UInt = 0u
+    ): Unit = gtk_box_pack_end(
+        box = box,
+        child = widget,
+        expand = if (expand) TRUE else FALSE,
+        fill = if (fill) TRUE else FALSE,
+        padding = padding
+    )
+
+    /**
      * Connects a signal (event) to a slot (event handler). Note that all callback parameters must be primitive types or
      * nullable C pointers.
      * @param obj The object to use for connecting a [signal][actionName] to a [slot][action].

@@ -12,10 +12,11 @@ fun main() {
         obj = app,
         actionName = "activate",
         action = staticCFunction(::activate),
-        data = mainWin.stableRef.asCPointer()
+        data = mainWin.fetchReference()
     )
-    val status = g_application_run(app.reinterpret(), 0, null)
+    val status = g_application_run(argc = 0, argv = null, application = app.reinterpret())
     g_object_unref(app)
+    mainWin.cleanUp()
     g_print("Application Status: %d", status)
 }
 

@@ -5,18 +5,33 @@ import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.StableRef
 import kotlinx.cinterop.reinterpret
 
+@Suppress("EXPERIMENTAL_UNSIGNED_LITERALS")
 internal class MainWindow {
-    val stableRef = StableRef.create(this)
+    private val stableRef = StableRef.create(this)
     var winPtr: CPointer<GtkWidget>? = null
     private var editor: CPointer<GtkWidget>? = null
+    private var statusBar: CPointer<GtkWidget>? = null
+
+    fun fetchReference() = stableRef.asCPointer()
+
+    fun cleanUp() {
+        stableRef.dispose()
+    }
 
     fun createMainLayout(): CPointer<GtkContainer>? {
         val mainLayout = gtk_box_new(GtkOrientation.GTK_ORIENTATION_VERTICAL, 0)
         val scrolledWin = createScrolledWindow()
+        createStatusBar()
         Controller.prependWidgetToBox(box = mainLayout?.reinterpret(), widget = scrolledWin?.reinterpret(),
             expand = true)
+        Controller.appendWidgetToBox(box = mainLayout?.reinterpret(), widget = statusBar?.reinterpret())
         gtk_widget_grab_focus(editor?.reinterpret())
         return mainLayout?.reinterpret()
+    }
+
+    private fun createStatusBar() {
+        statusBar = gtk_statusbar_new()
+        gtk_statusbar_push(statusbar = statusBar?.reinterpret(), text = "Ready", context_id = 0u)
     }
 
     private fun createScrolledWindow(): CPointer<GtkScrolledWindow>? {
