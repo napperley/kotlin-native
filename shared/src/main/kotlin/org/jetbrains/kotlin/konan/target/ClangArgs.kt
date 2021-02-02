@@ -85,6 +85,10 @@ class ClangArgs(private val configurables: Configurables) : Configurables by con
                 "-mfpu=vfp", "-mfloat-abi=hard"
         )
 
+        // TODO: Provide an empty list of compiler options for the raspberryPiPico target, which is overriden by the
+        //  konan.properties file.
+//        KonanTarget.RASPBERRY_PI_PICO -> emptyList()
+
         KonanTarget.MACOS_X64 -> listOf(
                 "-mmacosx-version-min=$osVersionMin"
         )
