@@ -169,10 +169,11 @@ internal val copyDefaultValuesToActualPhase = konanUnitPhase(
 internal val serializerPhase = konanUnitPhase(
         op = {
             val expectActualLinker = config.configuration.get(CommonConfigurationKeys.EXPECT_ACTUAL_LINKER) ?: false
+            val messageLogger = config.configuration.get(IrMessageLogger.IR_MESSAGE_LOGGER) ?: IrMessageLogger.None
 
             serializedIr = irModule?.let { ir ->
                 KonanIrModuleSerializer(
-                    this, ir.irBuiltins, expectDescriptorToSymbol, skipExpects = !expectActualLinker
+                    messageLogger, ir.irBuiltins, expectDescriptorToSymbol, skipExpects = !expectActualLinker
                 ).serializedIrModule(ir)
             }
 
@@ -373,7 +374,9 @@ internal val useInternalAbiPhase = makeKonanModuleOpPhase(
                             context.internalAbi.reference(it, irClass.module)
                         }
                     }
-                    return IrCallImpl(expression.startOffset, expression.endOffset, expression.type, accessor.symbol, accessor.typeParameters.size, accessor.valueParameters.size)
+                    return IrCallImpl.fromSymbolDescriptor(
+                            expression.startOffset, expression.endOffset, expression.type, accessor.symbol
+                    , accessor.typeParameters.size, accessor.valueParameters.size)
                 }
             }
             module.transformChildrenVoid(transformer)

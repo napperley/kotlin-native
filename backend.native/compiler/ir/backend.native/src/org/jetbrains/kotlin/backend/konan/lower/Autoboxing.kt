@@ -161,7 +161,7 @@ private class AutoboxingTransformer(val context: Context) : AbstractValueUsageTr
             val parameter = conversion.owner.explicitParameters.single()
             val argument = this.uncheckedCast(parameter.type)
 
-            IrCallImpl(startOffset, endOffset, conversion.owner.returnType, conversion,
+            IrCallImpl.fromSymbolDescriptor(startOffset, endOffset, conversion.owner.returnType, conversion,
                     conversion.owner.typeParameters.size, conversion.owner.valueParameters.size).apply {
                 addArguments(mapOf(parameter to argument))
             }.uncheckedCast(this.type) // Try not to bring new type incompatibilities.

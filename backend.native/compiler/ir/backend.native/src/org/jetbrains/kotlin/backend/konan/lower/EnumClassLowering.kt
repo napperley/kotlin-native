@@ -117,8 +117,9 @@ internal class EnumUsageLowering(val context: Context)
                 typeArgumentsCount = 0,
                 loweredEnum.itemGetterSymbol.owner.valueParameters.size
         ).apply {
-            dispatchReceiver = IrCallImpl(startOffset, endOffset, loweredEnum.valuesGetter.returnType,
-                    loweredEnum.valuesGetter.symbol, loweredEnum.valuesGetter.typeParameters.size,
+            dispatchReceiver = IrCallImpl.fromSymbolDescriptor(
+                    startOffset, endOffset, loweredEnum.valuesGetter.returnType, loweredEnum.valuesGetter.symbol
+            , loweredEnum.valuesGetter.typeParameters.size,
                     loweredEnum.valuesGetter.valueParameters.size)
             putValueArgument(0, IrConstImpl.int(startOffset, endOffset, context.irBuiltIns.intType, ordinal))
         }
