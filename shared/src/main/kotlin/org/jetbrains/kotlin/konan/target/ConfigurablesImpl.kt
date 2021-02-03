@@ -39,7 +39,7 @@ class ZephyrConfigurablesImpl(target: KonanTarget, properties: Properties, baseD
 
 fun loadConfigurables(target: KonanTarget, properties: Properties, baseDir: String?): Configurables = when (target)  {
         KonanTarget.LINUX_X64, KonanTarget.LINUX_ARM32_HFP, KonanTarget.LINUX_ARM64,
-        KonanTarget.LINUX_MIPS32, KonanTarget.LINUX_MIPSEL32 ->
+        KonanTarget.LINUX_MIPS32, KonanTarget.LINUX_MIPSEL32, KonanTarget.RASPBERRY_PI_PICO ->
             GccConfigurablesImpl(target, properties, baseDir)
 
         KonanTarget.MACOS_X64,

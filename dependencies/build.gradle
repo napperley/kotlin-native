@@ -97,7 +97,7 @@ platformManager.enabled.each { target ->
 
     DependencyKind.values().each { kind ->
         def dir = kind.getDirectory(loader)
-        if (dir != null) {
+        if (dir != null && dir != "libffi-3.2.1-2-linux-x86-64") {
             String path = dependencyProcessor.resolve(dir).canonicalPath
             rootProject.ext.set(kind.getPropertyName(target), path)
         }

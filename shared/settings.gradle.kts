@@ -22,3 +22,8 @@ pluginManagement {
 }
 
 rootProject.name = "kotlin-native-shared"
+
+// workaround for https://youtrack.jetbrains.com/issue/IDEA-257366
+if (gradle.startParameter.projectDir?.name == "buildSrc") {
+    gradle.startParameter.setIncludedBuilds(ArrayList<File>())
+}

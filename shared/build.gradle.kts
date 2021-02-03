@@ -54,6 +54,8 @@ sourceSets["main"].withConvention(KotlinSourceSet::class) {
 tasks.withType<KotlinCompile> {
     dependsOn(generateCompilerVersion)
     kotlinOptions.jvmTarget = "1.8"
+    // Suppress compiler compatibility errors.
+    kotlinOptions.freeCompilerArgs = listOf("-Xskip-prerelease-check")
 }
 
 tasks.clean {
