@@ -87,17 +87,18 @@ class ClangArgs(private val configurables: Configurables) : Configurables by con
 
         KonanTarget.RASPBERRY_PI_PICO -> emptyList()
 
-        KonanTarget.MACOS_X64 -> listOf(
-                "-mmacosx-version-min=$osVersionMin"
-        )
+        // TODO: Resolve missing symbol.
+//        KonanTarget.MACOS_X64 -> listOf(
+//                "-mmacosx-version-min=$osVersionMin"
+//        )
 
         // Here we workaround Clang 8 limitation: macOS major version should be 10.
         // So we compile runtime with version 10.16 and then override version in BitcodeCompiler.
-        // TODO: Fix with LLVM Update.
-        KonanTarget.MACOS_ARM64 -> listOf(
-                "-arch", "arm64",
-                "-mmacosx-version-min=10.16"
-        )
+        // TODO: Fix with LLVM Update, and resolve missing symbol.
+//        KonanTarget.MACOS_ARM64 -> listOf(
+//                "-arch", "arm64",
+//                "-mmacosx-version-min=10.16"
+//        )
 
         KonanTarget.IOS_ARM32 -> listOf(
                 "-stdlib=libc++",
@@ -190,6 +191,8 @@ class ClangArgs(private val configurables: Configurables) : Configurables by con
                 "-isystem$absoluteTargetSysRoot/include/libcxx",
                 "-isystem$absoluteTargetSysRoot/include/libc"
         ) + (configurables as ZephyrConfigurables).constructClangArgs()
+
+        else -> emptyList()
     }
 
     val clangPaths = listOf("$absoluteLlvmHome/bin", binDir)

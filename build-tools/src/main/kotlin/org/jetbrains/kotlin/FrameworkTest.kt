@@ -183,7 +183,8 @@ open class FrameworkTest : DefaultTask(), KonanTestExecutable {
             KonanTarget.IOS_ARM32, KonanTarget.IOS_ARM64 -> "iphoneos"
             KonanTarget.TVOS_X64 -> "appletvsimulator"
             KonanTarget.TVOS_ARM64 -> "appletvos"
-            KonanTarget.MACOS_X64, KonanTarget.MACOS_ARM64 -> "macosx"
+            // TODO: Resolve missing symbol.
+//            KonanTarget.MACOS_X64, KonanTarget.MACOS_ARM64 -> "macosx"
             KonanTarget.WATCHOS_ARM64 -> "watchos"
             KonanTarget.WATCHOS_X64, KonanTarget.WATCHOS_X86 -> "watchsimulator"
             else -> throw IllegalStateException("Test target $target is not supported")
@@ -254,8 +255,9 @@ open class FrameworkTest : DefaultTask(), KonanTestExecutable {
             KonanTarget.WATCHOS_X64 -> return // bitcode-build-tool doesn't support simulators.
             KonanTarget.IOS_ARM64,
             KonanTarget.IOS_ARM32 -> Xcode.current.iphoneosSdk
-            KonanTarget.MACOS_X64,
-            KonanTarget.MACOS_ARM64 -> Xcode.current.macosxSdk
+            // TODO: Resolve missing symbols.
+//            KonanTarget.MACOS_X64,
+//            KonanTarget.MACOS_ARM64 -> Xcode.current.macosxSdk
             KonanTarget.TVOS_ARM64 -> Xcode.current.appletvosSdk
             KonanTarget.WATCHOS_ARM32,
             KonanTarget.WATCHOS_ARM64 -> Xcode.current.watchosSdk
