@@ -68,6 +68,8 @@ if (isMac()) {
 }
 
 ext {
+    // TODO: Provide a way to specify libffi include, and lib dirs for Linux distros like Linux Mint, and Ubuntu.
+    linux_x64LibffiDir = "${System.getenv("HOME")}/libffi-3.3"
     distDir = file('dist')
     dependenciesDir = DependencyProcessor.defaultDependenciesRoot
     experimentalEnabled = project.hasProperty("org.jetbrains.kotlin.native.experimentalTargets")
