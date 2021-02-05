@@ -1628,7 +1628,7 @@ private fun Context.is64BitNSInteger(): Boolean = when (val target = this.config
     KonanTarget.WATCHOS_ARM64,
     KonanTarget.WATCHOS_ARM32,
     KonanTarget.WATCHOS_X86,
-    KonanTarget.IOS_ARM32 -> false
+    KonanTarget.IOS_ARM32,
     KonanTarget.ANDROID_X64,
     KonanTarget.ANDROID_X86,
     KonanTarget.ANDROID_ARM32,
@@ -1641,7 +1641,8 @@ private fun Context.is64BitNSInteger(): Boolean = when (val target = this.config
     KonanTarget.LINUX_MIPS32,
     KonanTarget.LINUX_MIPSEL32,
     KonanTarget.WASM32,
-    is KonanTarget.ZEPHYR -> error("Target $target has no support for NSInteger type.")
+    KonanTarget.RASPBERRY_PI_PICO -> false
+    else -> error("Target $target has no support for NSInteger type.")
 }
 
 internal fun Context.is64BitLong(): Boolean = when (this.config.target) {
@@ -1667,6 +1668,6 @@ internal fun Context.is64BitLong(): Boolean = when (this.config.target) {
     KonanTarget.LINUX_MIPS32,
     KonanTarget.LINUX_MIPSEL32,
     KonanTarget.WASM32,
-    is KonanTarget.ZEPHYR,
-    KonanTarget.IOS_ARM32 -> false
+    is KonanTarget.ZEPHYR, KonanTarget.IOS_ARM32, KonanTarget.RASPBERRY_PI_PICO -> false
+    else -> false
 }
