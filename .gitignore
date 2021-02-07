@@ -84,3 +84,4 @@ tools/toolchain_builder/artifacts
 runtime/.idea
 
 build_kotlin_native
+build_rpi_pico_dist
