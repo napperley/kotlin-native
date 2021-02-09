@@ -128,3 +128,8 @@ interface ZephyrConfigurables : TargetableConfigurables, ClangFlags {
     val boardSpecificClangFlags get() = targetList("boardSpecificClangFlags")
     val targetAbi get() = targetString("targetAbi")
 }
+
+interface RaspberryPiPicoConfigurables : TargetableConfigurables, ClangFlags {
+    val gccToolchain get() = hostTargetString("gccToolchain")
+    val libGcc get() = targetString("libGcc")!!
+}

@@ -49,6 +49,17 @@ class ClangArgs(private val configurables: Configurables) : Configurables by con
     // TODO: Use buildList
     private val commonClangArgs: List<String> = mutableListOf<List<String>>().apply {
         add(listOf("-B$binDir", "-fno-stack-protector"))
+        if (configurables is RaspberryPiPicoConfigurables) {
+            val args = listOf(
+                    "-target", "arm-none-eabi",
+                    "-isystem", "${configurables.gccToolchain}/lib/gcc/arm-none-eabi/10.2.1/include",
+                    "-isystem", "${configurables.gccToolchain}/lib/gcc/arm-none-eabi/10.2.1/include-fixed",
+                    "-isystem", "${configurables.targetToolchain}/include",
+                    "-isystem", "${configurables.targetToolchain}/include/c++/10.2.1",
+                    "-isystem", "${configurables.targetToolchain}/include/c++/10.2.1/arm-none-eabi",
+            )
+            add(args)
+        }
         if (configurables is GccConfigurables) {
             add(listOf("--gcc-toolchain=${configurables.absoluteGccToolchain}"))
         }

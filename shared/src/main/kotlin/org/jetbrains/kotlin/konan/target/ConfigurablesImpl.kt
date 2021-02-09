@@ -36,10 +36,13 @@ class WasmConfigurablesImpl(target: KonanTarget, properties: Properties, baseDir
 class ZephyrConfigurablesImpl(target: KonanTarget, properties: Properties, baseDir: String?)
     : ZephyrConfigurables, KonanPropertiesLoader(target, properties, baseDir)
 
+class RaspberryPiPicoConfigurablesImpl(target: KonanTarget, properties: Properties, baseDir: String?)
+    : RaspberryPiPicoConfigurables, KonanPropertiesLoader(target, properties, baseDir)
+
 
 fun loadConfigurables(target: KonanTarget, properties: Properties, baseDir: String?): Configurables = when (target)  {
         KonanTarget.LINUX_X64, KonanTarget.LINUX_ARM32_HFP, KonanTarget.LINUX_ARM64,
-        KonanTarget.LINUX_MIPS32, KonanTarget.LINUX_MIPSEL32, KonanTarget.RASPBERRY_PI_PICO ->
+        KonanTarget.LINUX_MIPS32, KonanTarget.LINUX_MIPSEL32 ->
             GccConfigurablesImpl(target, properties, baseDir)
 
     // TODO: Resolve missing symbol.
@@ -59,6 +62,8 @@ fun loadConfigurables(target: KonanTarget, properties: Properties, baseDir: Stri
 
         KonanTarget.WASM32 ->
             WasmConfigurablesImpl(target, properties, baseDir)
+
+        KonanTarget.RASPBERRY_PI_PICO -> RaspberryPiPicoConfigurablesImpl(target, properties, baseDir)
 
         is KonanTarget.ZEPHYR ->
                 ZephyrConfigurablesImpl(target, properties, baseDir)
